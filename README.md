@@ -6,10 +6,12 @@ A small Windows system monitor in pure Rust. It keeps CPU, GPU and memory readin
 
 ## Download
 
+Get these from the **[latest release](https://github.com/rozdaybeda/taskbar-monitor/releases/latest)**:
+
 | | Best for | Admin rights |
 |---|---|---|
-| **[Installer (MSI)](https://github.com/rozdaybeda/taskbar-monitor/releases/latest/download/Monitor.msi)** | Most people. Lets you choose CPU sensors, starting with Windows and update checks. | Once, during install |
-| **[Portable (zip)](https://github.com/rozdaybeda/taskbar-monitor/releases/latest/download/Monitor-portable.zip)** | Running without installing the app. | Once, if you turn on CPU sensors |
+| **Installer** (`taskbar-monitor-<version>.msi`) | Most people. Lets you choose CPU sensors, starting with Windows and update checks. | Once, during install |
+| **Portable** (`taskbar-monitor-<version>.zip`) | Running without installing the app. | Once, if you turn on CPU sensors |
 
 Needs 64-bit Windows.
 

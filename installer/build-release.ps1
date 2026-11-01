@@ -1,6 +1,6 @@
 # Builds the release exes and packages them two ways, in target\installer:
-#   Monitor-<version>.msi            per-machine installer, with optional service and driver
-#   Monitor-<version>-portable.zip   runs from anywhere, keeps its data next to the exe
+#   taskbar-monitor-<version>.msi    per-machine installer, with optional service and driver
+#   taskbar-monitor-<version>.zip    portable: runs from anywhere, keeps its data next to the exe
 #
 #   .\installer\build-release.ps1 -UpdateUrl https://example.com/monitor/latest.txt
 #
@@ -52,7 +52,7 @@ if ($LASTEXITCODE -ne 0) { throw 'adding the WiX UI extension failed' }
 
 $out = Join-Path $root 'target\installer'
 New-Item -ItemType Directory -Force $out | Out-Null
-$msi = Join-Path $out "Monitor-$Version.msi"
+$msi = Join-Path $out "taskbar-monitor-$Version.msi"
 dotnet tool run wix -- build installer\monitor.wxs -arch x64 -ext WixToolset.UI.wixext `
     -d "Version=$Version" `
     -d "ExePath=$root\target\release\monitor.exe" `
@@ -64,7 +64,7 @@ dotnet tool run wix -- build installer\monitor.wxs -arch x64 -ext WixToolset.UI.
     -o $msi
 if ($LASTEXITCODE -ne 0) { throw 'wix build failed' }
 
-Remove-Item (Join-Path $out "Monitor-$Version.wixpdb") -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $out "taskbar-monitor-$Version.wixpdb") -ErrorAction SilentlyContinue
 
 $stageFolder = Join-Path $out 'portable-stage'
 $folder = Join-Path $stageFolder 'Monitor'
@@ -78,7 +78,7 @@ Copy-Item "$root\installer\uninstall-sensors.bat" $folder
 Copy-Item "$root\installer\portable.txt" $folder
 Copy-Item "$root\installer\licenses\*" $folder
 Copy-Item $rustLicenses $folder
-$zip = Join-Path $out "Monitor-$Version-portable.zip"
+$zip = Join-Path $out "taskbar-monitor-$Version.zip"
 Remove-Item $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $folder -DestinationPath $zip -CompressionLevel Optimal
 Remove-Item $stageFolder -Recurse -Force

@@ -3,7 +3,7 @@
      signed before packaging, so only the MSI itself is signed here. -->
 <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
   <zip-file>
-    <msi-file path="Monitor-*.msi">
+    <msi-file path="taskbar-monitor-*.msi">
       <authenticode-sign/>
     </msi-file>
   </zip-file>

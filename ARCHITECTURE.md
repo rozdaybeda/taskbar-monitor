@@ -161,7 +161,7 @@ Intel CPU paths have not been run on Intel hardware.
 ```powershell
 .\fetch-pawnio.ps1               # obtain the files in driver\ (once)
 cargo build --release            # -> target\release\monitor.exe and monitor-setup.exe
-.\installer\build-release.ps1    # -> the MSI and portable zip in target\installer
+.\installer\build-release.ps1    # -> taskbar-monitor-<version>.msi and .zip in target\installer
 ```
 
 A development build runs from `target\debug` and works like a portable copy, except that it

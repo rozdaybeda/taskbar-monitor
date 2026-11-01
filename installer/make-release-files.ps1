@@ -1,8 +1,8 @@
 # Collects what a GitHub release publishes, from what build-release.ps1 built.
 #
-#   Monitor.msi, Monitor-portable.zip   fixed names, so that links to the latest release work
-#   latest.txt                          what installed copies check for a new version
-#   SHA256SUMS.txt                      to check a download by hand
+#   taskbar-monitor-<version>.msi, .zip   the installer and the portable copy
+#   latest.txt                            what installed copies check for a new version
+#   SHA256SUMS.txt                        to check a download by hand
 param(
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)][string]$Repository,
@@ -17,12 +17,13 @@ if (Test-Path $Out) { Remove-Item $Out -Recurse -Force }
 New-Item -ItemType Directory $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 
-Copy-Item (Join-Path $installer "Monitor-$version.msi") (Join-Path $Out 'Monitor.msi')
-Copy-Item (Join-Path $installer "Monitor-$version-portable.zip") (Join-Path $Out 'Monitor-portable.zip')
+$msi = "taskbar-monitor-$version.msi"
+Copy-Item (Join-Path $installer $msi) $Out
+Copy-Item (Join-Path $installer "taskbar-monitor-$version.zip") $Out
 
-# The link is to this exact release, so a copy that checks during a later publish still gets
-# the file the version number promised. ASCII, as PowerShell's own UTF-8 would add a BOM.
-$manifest = "version=$version`nurl=https://github.com/$Repository/releases/download/$Tag/Monitor.msi`n"
+# Only this file keeps a fixed name, so that installed copies can always find it. ASCII, as
+# PowerShell's own UTF-8 would add a BOM.
+$manifest = "version=$version`nurl=https://github.com/$Repository/releases/download/$Tag/$msi`n"
 [IO.File]::WriteAllText((Join-Path $Out 'latest.txt'), $manifest, [Text.Encoding]::ASCII)
 
 $sums = Get-ChildItem $Out | ForEach-Object {

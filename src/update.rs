@@ -7,7 +7,7 @@
 // the network.
 //
 //     version=0.2.0
-//     url=https://github.com/<owner>/<repo>/releases/download/v0.2.0/Monitor.msi
+//     url=https://github.com/<owner>/<repo>/releases/download/v0.2.0/taskbar-monitor-0.2.0.msi
 
 use std::sync::Mutex;
 use std::time::Duration;
