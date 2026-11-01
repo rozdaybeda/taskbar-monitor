@@ -116,5 +116,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create $env:TAG (Get-ChildItem dist).FullName --draft --verify-tag --generate-notes --title "Monitor $env:TAG"
+          gh release create $env:TAG (Get-ChildItem dist).FullName --draft --verify-tag --generate-notes --title "Taskbar Monitor $($env:TAG.TrimStart('v'))"
           if ($LASTEXITCODE -ne 0) { throw 'creating the release failed' }
