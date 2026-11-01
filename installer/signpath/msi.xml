@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Paste into a SignPath artifact configuration with the slug "msi". The exes inside were
+     signed before packaging, so only the MSI itself is signed here. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <msi-file path="Monitor-*.msi">
+      <authenticode-sign/>
+    </msi-file>
+  </zip-file>
+</artifact-configuration>

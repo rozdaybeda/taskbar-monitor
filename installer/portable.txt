@@ -5,7 +5,8 @@ Unzip anywhere and run monitor.exe. No installation or admin rights are needed.
 Settings and logs stay in the "data" folder next to monitor.exe, so the folder needs to be
 writable. To remove Monitor, quit it from its tray menu and delete this folder.
 
-It doesn't start with Windows and doesn't check for updates.
+It doesn't check for updates. It starts with Windows only if you turn that on in its tray
+menu. Turn that off before deleting this folder.
 
 CPU temperature, frequency and power ask for admin rights once. To turn them on, click the
 sensor icon in the app, or run install-sensors.bat. Either one installs two things for the

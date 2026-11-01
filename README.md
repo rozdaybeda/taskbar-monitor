@@ -8,7 +8,7 @@ A small Windows system monitor in pure Rust. It keeps CPU, GPU and memory readin
 
 | | Best for | Admin rights |
 |---|---|---|
-| **[Installer (MSI)](https://github.com/rozdaybeda/taskbar-monitor/releases/latest/download/Monitor.msi)** | Most people. Starts with Windows and tells you about updates. | Once, during install |
+| **[Installer (MSI)](https://github.com/rozdaybeda/taskbar-monitor/releases/latest/download/Monitor.msi)** | Most people. Lets you choose CPU sensors, starting with Windows and update checks. | Once, during install |
 | **[Portable (zip)](https://github.com/rozdaybeda/taskbar-monitor/releases/latest/download/Monitor-portable.zip)** | Running without installing the app. | Once, if you turn on CPU sensors |
 
 Needs 64-bit Windows.
@@ -31,6 +31,10 @@ Releases aren't code-signed yet, so Windows may warn that the publisher is unkno
 Windows only lets kernel drivers read CPU temperature, frequency and power. Everything else works without admin rights.
 
 Monitor uses the signed [PawnIO](https://pawnio.eu) driver, whose modules allow only the CPU registers they list. A small Windows service reads the sensors and passes the values to the app, so the app itself never runs as admin or touches the driver. Other programs can read those sensor values, but can't use the service to reach the driver.
+
+## Privacy
+
+Monitor doesn't send your readings or anything about your PC anywhere. The one thing it does online is ask GitHub once a day whether there's a newer version, and GitHub sees your IP address, as with any web request. You can turn this off during install or in the tray menu. Portable copies never check.
 
 ## Uninstalling
 

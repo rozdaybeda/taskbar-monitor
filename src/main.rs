@@ -2,6 +2,7 @@
 
 mod logging;
 mod sensors;
+mod settings;
 #[allow(dead_code)] // some codes are only used by the setup crate
 mod setup_exit;
 mod tray;
@@ -29,6 +30,11 @@ fn main() -> eframe::Result<()> {
     // Used by the installer, so it can replace the exe of a running copy.
     if args.iter().any(|a| a == "--quit") {
         tray::quit_running_instance();
+        return Ok(());
+    }
+    // Used by the installer when uninstalling.
+    if args.iter().any(|a| a == "--remove-autostart") {
+        settings::remove_own_auto_start();
         return Ok(());
     }
     // Run as the Windows service, with no GUI and no single-instance guard.
@@ -66,6 +72,7 @@ fn main() -> eframe::Result<()> {
         std::process::id(),
         is_elevated()
     );
+    settings::init();
     let shared = Arc::new(Mutex::new(Shared::default()));
     let sampler = Sampler::start(shared.clone());
 

@@ -46,6 +46,7 @@ values to the app over a read-only named pipe. The app never touches the driver.
 | `src/tray.rs` | tray icon and taskbar widget |
 | `src/logging.rs` | log files, shared with the `setup` crate |
 | `src/update.rs` | daily check for a newer release |
+| `src/settings.rs` | per-user choices: starting with Windows, checking for updates |
 | `src/sensors/mod.rs` | `Sampler`: the app's background thread, writes `Shared` |
 | `src/sensors/service.rs` | the service, its named pipe, and the app's client for it |
 | `src/sensors/cpu.rs` | CPU temperature, clocks and power, for AMD and Intel |
@@ -70,14 +71,26 @@ stat offers to install it.
 | | MSI | Portable zip |
 |---|---|---|
 | **Admin prompt** | Once, at install | Once, when the sensors are first enabled |
-| **Installed by** | The MSI itself | `monitor-setup.exe`, from the sensor icon or `install-sensors.bat` |
+| **Sensors installed by** | The MSI, if ticked; otherwise `monitor-setup.exe`, from the sensor icon | `monitor-setup.exe`, from the sensor icon or `install-sensors.bat` |
 | **App folder** | `%ProgramFiles%\Monitor` | Wherever it was unzipped |
-| **Service runs** | `monitor.exe --service`, from the app folder | `monitor-sensors.exe --service`, a copy in `%ProgramFiles%\Monitor Sensors` |
+| **Service runs** | `monitor-sensors.exe --service`, in the app folder | `monitor-sensors.exe --service`, in `%ProgramFiles%\Monitor Sensors` |
 
 `monitor.exe` has no install code and asks for no admin rights. `monitor-setup.exe` has a
 manifest that requires them. The service only ever runs from a folder under Program Files:
 one the user can write to would hand out SYSTEM rights. Installing the MSI replaces a
-portable copy's service, and `monitor-setup.exe uninstall` leaves the MSI's service alone.
+portable copy's service if its sensors option is on, and `monitor-setup.exe uninstall` leaves
+the MSI's service alone.
+
+### Choices
+
+The MSI's options screen offers CPU sensors, starting with Windows and update checks, all on
+by default. For a silent install, set `INSTALLSENSORS`, `AUTOSTART` and `CHECKUPDATES` to `1`
+or `0` on the `msiexec` command line. An upgrade keeps the earlier choices and doesn't ask.
+
+The MSI leaves the last two in `HKLM\Software\Monitor`. The first time each user runs the
+installed copy, `settings.rs` uses them to set up that user's own choices, which they can then
+change in the tray menu with no admin rights: starting with Windows in their `Run` key, and
+update checks in `settings.txt`.
 
 ## CPU — `cpu.rs` + `pawnio.rs`
 
@@ -85,7 +98,7 @@ Reading a CPU die temperature needs kernel-mode access to CPU registers, so we u
 kernel driver (**PawnIO**) and talk to it via `DeviceIoControl`. It runs signed modules that
 allow only the registers they list.
 
-- **Driver lifecycle**: the MSI or `monitor-setup.exe` runs the official setup
+- **Driver lifecycle**: the MSI, if the sensors are chosen, or `monitor-setup.exe` runs the official setup
   (`-install -silent`) if the driver is missing. The service opens
   `\\?\GLOBALROOT\Device\PawnIO` and loads `AMDFamily17` or `IntelMSR`, only while a client
   is connected. The driver stays installed when Monitor is removed, as other apps share it.
@@ -179,8 +192,7 @@ don't check.
 Without signing settings, releases are unsigned. To turn on SignPath:
 
 1. Set up the project at SignPath, with GitHub as a trusted build system, and with
-   `exes` and `msi` artifact configurations: a `zip-file` root holding the two `.exe` files,
-   and a `zip-file` root holding the `.msi`.
+   artifact configurations using the slugs `exes` and `msi`, from `installer/signpath/`.
 2. In the GitHub repo's Actions settings, add the secret `SIGNPATH_API_TOKEN` and the
    variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_POLICY_SLUG`.
 

@@ -1,5 +1,5 @@
 # Builds the release exes and packages them two ways, in target\installer:
-#   Monitor-<version>.msi            per-machine installer, with the service and driver
+#   Monitor-<version>.msi            per-machine installer, with optional service and driver
 #   Monitor-<version>-portable.zip   runs from anywhere, keeps its data next to the exe
 #
 #   .\installer\build-release.ps1 -UpdateUrl https://example.com/monitor/latest.txt
@@ -47,12 +47,13 @@ $rustLicenses = "$root\target\release\RUST-LICENSES.txt"
 if ($LASTEXITCODE -ne 0) { throw 'listing the Rust licences failed' }
 
 dotnet tool restore | Out-Null
-dotnet tool run wix -- extension list -g | Out-Null
+dotnet tool run wix -- extension add -g WixToolset.UI.wixext/5.0.2 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'adding the WiX UI extension failed' }
 
 $out = Join-Path $root 'target\installer'
 New-Item -ItemType Directory -Force $out | Out-Null
 $msi = Join-Path $out "Monitor-$Version.msi"
-dotnet tool run wix -- build installer\monitor.wxs -arch x64 `
+dotnet tool run wix -- build installer\monitor.wxs -arch x64 -ext WixToolset.UI.wixext `
     -d "Version=$Version" `
     -d "ExePath=$root\target\release\monitor.exe" `
     -d "SetupExePath=$root\target\release\monitor-setup.exe" `
@@ -65,9 +66,9 @@ if ($LASTEXITCODE -ne 0) { throw 'wix build failed' }
 
 Remove-Item (Join-Path $out "Monitor-$Version.wixpdb") -ErrorAction SilentlyContinue
 
-$stage = Join-Path $out 'portable-stage'
-$folder = Join-Path $stage 'Monitor'
-Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+$stageFolder = Join-Path $out 'portable-stage'
+$folder = Join-Path $stageFolder 'Monitor'
+Remove-Item $stageFolder -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $folder | Out-Null
 Copy-Item "$root\target\release\monitor.exe" $folder
 Copy-Item "$root\target\release\monitor-setup.exe" $folder
@@ -80,7 +81,7 @@ Copy-Item $rustLicenses $folder
 $zip = Join-Path $out "Monitor-$Version-portable.zip"
 Remove-Item $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $folder -DestinationPath $zip -CompressionLevel Optimal
-Remove-Item $stage -Recurse -Force
+Remove-Item $stageFolder -Recurse -Force
 
 $size = { param($file) "$([math]::Round((Get-Item $file).Length / 1MB, 1)) MB" }
 "Built $msi ($(& $size $msi))"

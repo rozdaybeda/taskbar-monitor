@@ -1,12 +1,16 @@
 <!--
-  Per-machine installer: it asks for admin rights once, and installs the app, the sensor
-  service and the PawnIO driver, so CPU sensors work from the first start with no more
-  prompts. Build it with installer\build-release.ps1.
+  Per-machine installer: it asks for admin rights once. An options screen lets the user
+  choose whether to install the CPU sensors (a service and the PawnIO driver), start with
+  Windows, and check for updates. Build it with installer\build-release.ps1.
+
+  For a silent install, these can be set on the command line as INSTALLSENSORS, AUTOSTART
+  and CHECKUPDATES, to 1 or 0. All default to 1. An upgrade keeps the earlier choices.
 
   The driver stays on uninstall, as other apps can share it. It has its own entry in
   Windows' installed apps.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <!-- UpgradeCode must never change: it's how a new version finds the old one. -->
   <Package Name="Monitor"
            Manufacturer="Oleksandr Rozdaibida"
@@ -30,6 +34,87 @@
                       Bitness="always64" />
     </Property>
 
+    <!--
+      The choices, always "1" or "0". An empty value wouldn't work: Windows Installer doesn't
+      pass empty properties on from the dialogs, so the default would come back. So the
+      checkboxes have properties of their own, and Next turns them into these.
+    -->
+    <Property Id="INSTALLSENSORS" Value="1" Secure="yes">
+      <RegistrySearch Id="SavedInstallSensors" Root="HKLM" Key="Software\Monitor" Name="InstallSensors" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="AUTOSTART" Value="1" Secure="yes">
+      <RegistrySearch Id="SavedAutoStart" Root="HKLM" Key="Software\Monitor" Name="AutoStart" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="CHECKUPDATES" Value="1" Secure="yes">
+      <RegistrySearch Id="SavedCheckUpdates" Root="HKLM" Key="Software\Monitor" Name="CheckUpdates" Type="raw" Bitness="always64" />
+    </Property>
+    <SetProperty Id="UI_SENSORS" Value="1" After="AppSearch" Sequence="ui" Condition='INSTALLSENSORS="1"' />
+    <SetProperty Id="UI_AUTOSTART" Value="1" After="AppSearch" Sequence="ui" Condition='AUTOSTART="1"' />
+    <SetProperty Id="UI_UPDATES" Value="1" After="AppSearch" Sequence="ui" Condition='CHECKUPDATES="1"' />
+
+    <UI Id="MonitorUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="WixUI_Mode" Value="Minimal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <Dialog Id="OptionsDlg" Width="370" Height="270" Title="!(loc.WelcomeDlg_Title)">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Options" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="You can change the last two later, from Monitor's tray menu." />
+
+        <Control Id="SensorsBox" Type="CheckBox" X="20" Y="54" Width="330" Height="14" Property="UI_SENSORS" CheckBoxValue="1" Text="Install CPU sensors" />
+        <Control Id="SensorsText" Type="Text" X="35" Y="69" Width="320" Height="52" NoPrefix="yes" Text="To read CPU temperature, frequency and power, this installs the PawnIO kernel driver and a small Windows service that runs with full system rights. Both can be removed from Installed apps. PawnIO stays if you uninstall Monitor, as other apps can share it. Without this, everything else still works, and you can turn the sensors on later in the app." />
+
+        <Control Id="AutoStartBox" Type="CheckBox" X="20" Y="126" Width="330" Height="14" Property="UI_AUTOSTART" CheckBoxValue="1" Text="Start Monitor with Windows" />
+        <Control Id="AutoStartText" Type="Text" X="35" Y="141" Width="320" Height="14" NoPrefix="yes" Text="Keeps the readings in your taskbar after you sign in." />
+
+        <Control Id="UpdatesBox" Type="CheckBox" X="20" Y="164" Width="330" Height="14" Property="UI_UPDATES" CheckBoxValue="1" Text="Check for updates" />
+        <Control Id="UpdatesText" Type="Text" X="35" Y="179" Width="320" Height="40" NoPrefix="yes" Text="Asks GitHub once a day whether there's a newer version, and tells you if there is. It doesn't send your readings or anything about your PC, and it doesn't install anything by itself. GitHub sees your IP address, as with any web request." />
+      </Dialog>
+
+      <Publish Dialog="OptionsDlg" Control="Next" Property="INSTALLSENSORS" Value="1" Order="1" Condition="UI_SENSORS" />
+      <Publish Dialog="OptionsDlg" Control="Next" Property="INSTALLSENSORS" Value="0" Order="2" Condition="NOT UI_SENSORS" />
+      <Publish Dialog="OptionsDlg" Control="Next" Property="AUTOSTART" Value="1" Order="3" Condition="UI_AUTOSTART" />
+      <Publish Dialog="OptionsDlg" Control="Next" Property="AUTOSTART" Value="0" Order="4" Condition="NOT UI_AUTOSTART" />
+      <Publish Dialog="OptionsDlg" Control="Next" Property="CHECKUPDATES" Value="1" Order="5" Condition="UI_UPDATES" />
+      <Publish Dialog="OptionsDlg" Control="Next" Property="CHECKUPDATES" Value="0" Order="6" Condition="NOT UI_UPDATES" />
+      <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="7" />
+      <Publish Dialog="OptionsDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+
+      <!-- An upgrade keeps the earlier choices, so it doesn't ask again. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="OptionsDlg" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="WIX_UPGRADE_DETECTED OR (Installed AND PATCH)" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="1" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="WIX_UPGRADE_DETECTED OR (Installed AND PATCH)" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="3" Condition="Installed AND NOT PATCH" />
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
+
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Monitor">
         <Directory Id="LOGSFOLDER" Name="logs" />
@@ -37,10 +122,14 @@
     </StandardDirectory>
 
     <Feature Id="Main" Title="Monitor">
-      <!-- The service runs from the app's exe, as this folder is only writable by admins. -->
       <Component Id="App" Directory="INSTALLFOLDER" Guid="5B8E2D71-3C64-4A19-8F07-D1E96A4C2B38">
         <File Id="MonitorExe" Source="$(var.ExePath)" Name="monitor.exe" KeyPath="yes" />
-        <ServiceInstall Id="SensorService"
+      </Component>
+
+      <!-- The service has its own copy of the exe, as a service needs its own component. -->
+      <Component Id="SensorService" Directory="INSTALLFOLDER" Guid="B3D17A4E-6C92-4F05-8E31-A7C4092D6F18" Condition='INSTALLSENSORS="1"'>
+        <File Id="ServiceExe" Source="$(var.ExePath)" Name="monitor-sensors.exe" KeyPath="yes" />
+        <ServiceInstall Id="SensorServiceInstall"
                         Name="MonitorSensors"
                         DisplayName="Monitor CPU sensors"
                         Description="Reads CPU temperature, frequency and power for Monitor."
@@ -76,13 +165,15 @@
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>
 
-      <Component Id="AutoRun" Directory="INSTALLFOLDER" Guid="8C3F5A12-D6E9-47B0-9A24-F1E70B6D5C83">
-        <RegistryValue Root="HKLM"
-                       Key="Software\Microsoft\Windows\CurrentVersion\Run"
-                       Name="Monitor"
-                       Type="string"
-                       Value="&quot;[INSTALLFOLDER]monitor.exe&quot;"
-                       KeyPath="yes" />
+      <!--
+        The app reads these the first time each user runs it, to set up that user's choices.
+        The installer reads them back on an upgrade.
+      -->
+      <Component Id="Choices" Directory="INSTALLFOLDER" Guid="6A9E04D2-C17B-4E38-92F6-D05B7A1C3E47">
+        <RegistryValue Root="HKLM" Key="Software\Monitor" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Monitor" Name="InstallSensors" Type="string" Value="[INSTALLSENSORS]" />
+        <RegistryValue Root="HKLM" Key="Software\Monitor" Name="AutoStart" Type="string" Value="[AUTOSTART]" />
+        <RegistryValue Root="HKLM" Key="Software\Monitor" Name="CheckUpdates" Type="string" Value="[CHECKUPDATES]" />
       </Component>
 
       <Component Id="StartMenu" Directory="ProgramMenuFolder" Guid="F7B24E09-1A5D-4863-BC96-3D8E0A7C1F52">
@@ -100,20 +191,26 @@
       exe. This asks the installed copy to really exit.
     -->
     <CustomAction Id="QuitRunningApp" FileRef="MonitorExe" ExeCommand="--quit" Execute="immediate" Return="ignore" />
+    <!-- Starting with Windows is set per user. This covers the user running the uninstall. -->
+    <CustomAction Id="RemoveAutoStart" FileRef="MonitorExe" ExeCommand="--remove-autostart" Execute="immediate" Return="ignore" />
     <!--
       A portable copy may have installed the same service, from its own folder. This removes
       that, so the service below can take its name. On an upgrade, there's nothing left to
       remove by this point.
     -->
     <CustomAction Id="RemovePortableService" FileRef="SetupExe" ExeCommand="uninstall" Execute="deferred" Impersonate="no" Return="ignore" />
+    <!-- If the sensors were skipped and turned on later in the app, this removes them too. -->
+    <CustomAction Id="RemoveLaterService" FileRef="SetupExe" ExeCommand="uninstall" Execute="deferred" Impersonate="no" Return="ignore" />
     <!-- Not fatal: without the driver, the rest still works, and the app shows the reason. -->
     <CustomAction Id="InstallPawnIO" FileRef="PawnIOSetup" ExeCommand="-install -silent" Execute="deferred" Impersonate="no" Return="ignore" />
     <CustomAction Id="StartApp" FileRef="MonitorExe" ExeCommand="" Execute="immediate" Return="asyncNoWait" />
 
     <InstallExecuteSequence>
       <Custom Action="QuitRunningApp" Before="InstallValidate" Condition="Installed OR WIX_UPGRADE_DETECTED" />
-      <Custom Action="InstallPawnIO" After="InstallFiles" Condition="NOT REMOVE AND NOT PAWNIO_INSTALLED" />
-      <Custom Action="RemovePortableService" Before="InstallServices" Condition="NOT Installed" />
+      <Custom Action="RemoveAutoStart" After="QuitRunningApp" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
+      <Custom Action="RemoveLaterService" Before="RemoveFiles" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
+      <Custom Action="InstallPawnIO" After="InstallFiles" Condition='NOT REMOVE AND NOT PAWNIO_INSTALLED AND INSTALLSENSORS="1"' />
+      <Custom Action="RemovePortableService" Before="InstallServices" Condition='NOT Installed AND INSTALLSENSORS="1"' />
       <Custom Action="StartApp" After="InstallFinalize" Condition="NOT REMOVE" />
     </InstallExecuteSequence>
   </Package>

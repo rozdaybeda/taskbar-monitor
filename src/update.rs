@@ -1,5 +1,6 @@
-// Checks for a newer release: shortly after starting, then once a day. This only tells
-// the user. Installing is theirs to choose, by opening the download link.
+// Checks for a newer release: shortly after starting, then once a day, unless the user has
+// turned that off. This only tells the user. Installing is theirs to choose, by opening the
+// download link.
 //
 // The check reads a small text file from the URL set by MONITOR_UPDATE_URL at build time.
 // Release builds point it at the latest GitHub release. Builds without a URL never touch
@@ -17,6 +18,8 @@ use windows::Win32::Networking::WinHttp::*;
 const UPDATE_URL: Option<&str> = option_env!("MONITOR_UPDATE_URL");
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How soon turning the checks back on takes effect.
+const SETTING_POLL: Duration = Duration::from_secs(60);
 const TIMEOUT_MS: i32 = 15_000;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
@@ -28,25 +31,44 @@ pub struct Update {
 
 static AVAILABLE: Mutex<Option<Update>> = Mutex::new(None);
 
-/// The newer release found by the last check, if any.
+/// The newer release found by the last check, if any, while checks are on.
 pub fn available() -> Option<Update> {
-    AVAILABLE.lock().unwrap().clone()
+    AVAILABLE
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|_| crate::settings::check_updates())
+}
+
+/// Whether this copy can check at all, so whether the setting means anything. The update
+/// link leads to an installer, which isn't how a portable copy gets updated.
+pub fn can_check() -> bool {
+    !crate::logging::is_portable() && UPDATE_URL.is_some_and(|url| !url.is_empty())
+}
+
+fn check_is_due(checks_on: bool, since_last: Option<Duration>) -> bool {
+    checks_on && since_last.is_none_or(|elapsed| elapsed >= CHECK_INTERVAL)
 }
 
 /// Starts checking in the background. `on_found` runs when a new version first shows up.
 pub fn start(on_found: fn()) {
-    // The update link leads to an installer, which isn't how a portable copy gets updated.
-    if crate::logging::is_portable() {
-        log::info!("update checks off: portable copy");
-        return;
-    }
-    let Some(url) = UPDATE_URL.filter(|u| !u.is_empty()) else {
-        log::info!("update checks off: this build has no update URL");
-        return;
+    let url = match UPDATE_URL {
+        Some(url) if can_check() => url,
+        _ => {
+            log::info!("update checks not available: a portable copy, or no update URL");
+            return;
+        }
     };
     std::thread::spawn(move || {
         std::thread::sleep(FIRST_CHECK_DELAY);
+        let mut last_check: Option<std::time::Instant> = None;
         loop {
+            let since_last = last_check.map(|t| t.elapsed());
+            if !check_is_due(crate::settings::check_updates(), since_last) {
+                std::thread::sleep(SETTING_POLL);
+                continue;
+            }
+            last_check = Some(std::time::Instant::now());
             match check(url) {
                 Ok(Some(update)) => {
                     let is_new = AVAILABLE.lock().unwrap().as_ref() != Some(&update);
@@ -59,7 +81,6 @@ pub fn start(on_found: fn()) {
                 Ok(None) => log::info!("update check: {} is current", env!("CARGO_PKG_VERSION")),
                 Err(e) => log::warn!("update check failed: {e}"),
             }
-            std::thread::sleep(CHECK_INTERVAL);
         }
     });
 }
@@ -235,6 +256,17 @@ fn fetch(url: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checks_only_run_when_on_and_due() {
+        let day = CHECK_INTERVAL;
+        let minute = Duration::from_secs(60);
+        assert!(check_is_due(true, None), "never checked");
+        assert!(check_is_due(true, Some(day)));
+        assert!(!check_is_due(true, Some(minute)));
+        assert!(!check_is_due(false, None));
+        assert!(!check_is_due(false, Some(day)));
+    }
 
     #[test]
     fn compares_versions_numerically() {

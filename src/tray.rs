@@ -59,6 +59,8 @@ const MENU_WIDGET: usize = 2;
 const MENU_ENABLE: usize = 3;
 const MENU_QUIT: usize = 4;
 const MENU_UPDATE: usize = 5;
+const MENU_AUTO_START: usize = 6;
+const MENU_CHECK_UPDATES: usize = 7;
 const MENU_MODE_BASE: usize = 50;
 const MENU_ITEM_BASE: usize = 100;
 
@@ -1194,6 +1196,15 @@ unsafe fn show_menu() {
         let _ = AppendMenuW(menu, MF_STRING, MENU_ENABLE, w!("&Enable CPU temperature"));
     }
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    let auto_start = crate::settings::auto_start();
+    let check = if auto_start { MF_CHECKED } else { MF_UNCHECKED };
+    let _ = AppendMenuW(menu, MF_STRING | check, MENU_AUTO_START, w!("&Start with Windows"));
+    let check_updates = crate::settings::check_updates();
+    if crate::update::can_check() {
+        let check = if check_updates { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | check, MENU_CHECK_UPDATES, w!("Check for &updates"));
+    }
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("&Quit"));
 
     let mut cursor = POINT::default();
@@ -1219,6 +1230,8 @@ unsafe fn show_menu() {
         MENU_UPDATE => open_update_page(),
         MENU_WIDGET => set_widget_visible(!visible),
         MENU_ENABLE => start_sensors(),
+        MENU_AUTO_START => crate::settings::set_auto_start(!auto_start),
+        MENU_CHECK_UPDATES => crate::settings::set_check_updates(!check_updates),
         MENU_QUIT => quit(),
         id if (MENU_MODE_BASE..MENU_MODE_BASE + WIDGET_MODES.len()).contains(&id) => {
             set_widget_mode(WIDGET_MODES[id - MENU_MODE_BASE]);
