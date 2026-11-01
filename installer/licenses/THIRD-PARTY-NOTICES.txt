@@ -1,0 +1,19 @@
+Monitor's own code is under the MIT License:
+https://github.com/rozdaybeda/taskbar-monitor/blob/main/LICENSE
+
+The Rust libraries built into it are listed, with their licences, in RUST-LICENSES.txt.
+That includes the egui library's fonts. Its Ubuntu font is under UFL-1.0.txt.
+
+It also includes these third-party components, used without changes:
+
+PawnIO setup and driver, version 2.2.0
+  Copyright (C) namazso
+  License: GNU General Public License, version 2 or later, with the exception described in
+  its README for independent programs using the device IO control interface. See GPL-2.0.txt.
+  Source: https://github.com/namazso/PawnIO
+  Releases: https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0
+
+PawnIO modules AMDFamily17 and IntelMSR, version 0.2.11
+  Copyright (C) namazso
+  License: GNU Lesser General Public License, version 2.1 or later. See LGPL-2.1.txt.
+  Source: https://github.com/namazso/PawnIO.Modules/tree/0.2.11

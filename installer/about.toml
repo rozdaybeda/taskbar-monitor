@@ -1,0 +1,21 @@
+# What `cargo about` accepts when it lists the Rust dependencies' licences for the packages.
+# A dependency under anything else fails the build, so a new licence gets looked at first.
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+accepted = [
+    "MIT",
+    # The fonts that egui builds in: Hack, Noto, and Ubuntu.
+    "OFL-1.1",
+    "LicenseRef-UFL-1.0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]

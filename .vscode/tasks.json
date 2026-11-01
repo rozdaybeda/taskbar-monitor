@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            // A running copy locks the exe (build fails) and the single-instance
+            // guard would make the new copy exit silently, so close it first.
+            // A sensor service running as monitor.exe can't be killed from here, and
+            // doesn't block anything: it runs from Program Files.
+            "label": "stop running monitor",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "if (Get-Process monitor -ErrorAction SilentlyContinue) { Stop-Process -Name monitor -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 1500 }; exit 0"
+            ],
+            "presentation": { "reveal": "silent" },
+            "problemMatcher": []
+        },
+        {
+            "label": "build monitor",
+            "type": "process",
+            // Full path: cargo isn't on the system PATH on this machine.
+            "command": "${env:USERPROFILE}/.cargo/bin/cargo.exe",
+            "args": ["build"],
+            "dependsOn": "stop running monitor",
+            "group": { "kind": "build", "isDefault": true },
+            "presentation": { "reveal": "silent" },
+            "problemMatcher": ["$rustc"]
+        }
+    ]
+}

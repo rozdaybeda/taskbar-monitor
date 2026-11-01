@@ -1,0 +1,19 @@
+Monitor, portable copy
+
+Unzip anywhere and run monitor.exe. No installation or admin rights are needed.
+
+Settings and logs stay in the "data" folder next to monitor.exe, so the folder needs to be
+writable. To remove Monitor, quit it from its tray menu and delete this folder.
+
+It doesn't start with Windows and doesn't check for updates.
+
+CPU temperature, frequency and power ask for admin rights once. To turn them on, click the
+sensor icon in the app, or run install-sensors.bat. Either one installs two things for the
+whole system: a small Windows service in Program Files, and the PawnIO driver. Unlike the
+rest of Monitor, they stay after you delete this folder.
+
+To remove the service, run uninstall-sensors.bat, or use Installed apps in Windows Settings
+and look for "Monitor CPU sensors". The PawnIO driver has its own entry there, "PawnIO".
+
+This file is what marks the copy as portable. Without it, Monitor keeps its data in
+%APPDATA%\Monitor instead.

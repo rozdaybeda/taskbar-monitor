@@ -1,0 +1,120 @@
+<!--
+  Per-machine installer: it asks for admin rights once, and installs the app, the sensor
+  service and the PawnIO driver, so CPU sensors work from the first start with no more
+  prompts. Build it with installer\build-release.ps1.
+
+  The driver stays on uninstall, as other apps can share it. It has its own entry in
+  Windows' installed apps.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!-- UpgradeCode must never change: it's how a new version finds the old one. -->
+  <Package Name="Monitor"
+           Manufacturer="Oleksandr Rozdaibida"
+           Version="$(var.Version)"
+           UpgradeCode="7E2C9B14-5D3A-4F86-9A41-2B6C8E1D7F03"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Monitor is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="icon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="icon.ico" />
+
+    <Property Id="PAWNIO_INSTALLED" Secure="yes">
+      <RegistrySearch Id="PawnIOVersion"
+                      Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
+                      Name="DisplayVersion"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Monitor">
+        <Directory Id="LOGSFOLDER" Name="logs" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Monitor">
+      <!-- The service runs from the app's exe, as this folder is only writable by admins. -->
+      <Component Id="App" Directory="INSTALLFOLDER" Guid="5B8E2D71-3C64-4A19-8F07-D1E96A4C2B38">
+        <File Id="MonitorExe" Source="$(var.ExePath)" Name="monitor.exe" KeyPath="yes" />
+        <ServiceInstall Id="SensorService"
+                        Name="MonitorSensors"
+                        DisplayName="Monitor CPU sensors"
+                        Description="Reads CPU temperature, frequency and power for Monitor."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Arguments="--service"
+                        Vital="yes" />
+        <ServiceControl Id="SensorServiceControl"
+                        Name="MonitorSensors"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+
+      <Component Id="Companions" Directory="INSTALLFOLDER" Guid="E4A07C96-2F1B-4D83-B6C5-97D3180AF2E6">
+        <File Id="PawnIOSetup" Source="$(var.PawnIOSetupPath)" Name="PawnIO_setup.exe" KeyPath="yes" />
+        <File Id="SetupExe" Source="$(var.SetupExePath)" Name="monitor-setup.exe" />
+        <File Id="Notices" Source="$(var.LicensesPath)\THIRD-PARTY-NOTICES.txt" />
+        <File Id="LicenseGpl" Source="$(var.LicensesPath)\GPL-2.0.txt" />
+        <File Id="LicenseLgpl" Source="$(var.LicensesPath)\LGPL-2.1.txt" />
+        <File Id="LicenseUfl" Source="$(var.LicensesPath)\UFL-1.0.txt" />
+        <File Id="LicenseRust" Source="$(var.RustLicensesPath)" Name="RUST-LICENSES.txt" />
+      </Component>
+
+      <!-- The service writes logs here, which the installer doesn't otherwise know about. -->
+      <Component Id="ServiceLogs" Directory="LOGSFOLDER" Guid="29D6F1A8-74BE-4C30-A5E1-6B08C3D7F914">
+        <CreateFolder />
+        <RemoveFile Id="RemoveServiceLogs" Name="*" On="uninstall" />
+        <RemoveFolder Id="RemoveLogsFolder" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+      </Component>
+
+      <Component Id="AutoRun" Directory="INSTALLFOLDER" Guid="8C3F5A12-D6E9-47B0-9A24-F1E70B6D5C83">
+        <RegistryValue Root="HKLM"
+                       Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="Monitor"
+                       Type="string"
+                       Value="&quot;[INSTALLFOLDER]monitor.exe&quot;"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="StartMenu" Directory="ProgramMenuFolder" Guid="F7B24E09-1A5D-4863-BC96-3D8E0A7C1F52">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="Monitor"
+                  Target="[INSTALLFOLDER]monitor.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="icon.ico" />
+        <RegistryValue Root="HKLM" Key="Software\Monitor" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+
+    <!--
+      The close button only sends the app to the tray, so a normal close wouldn't free the
+      exe. This asks the installed copy to really exit.
+    -->
+    <CustomAction Id="QuitRunningApp" FileRef="MonitorExe" ExeCommand="--quit" Execute="immediate" Return="ignore" />
+    <!--
+      A portable copy may have installed the same service, from its own folder. This removes
+      that, so the service below can take its name. On an upgrade, there's nothing left to
+      remove by this point.
+    -->
+    <CustomAction Id="RemovePortableService" FileRef="SetupExe" ExeCommand="uninstall" Execute="deferred" Impersonate="no" Return="ignore" />
+    <!-- Not fatal: without the driver, the rest still works, and the app shows the reason. -->
+    <CustomAction Id="InstallPawnIO" FileRef="PawnIOSetup" ExeCommand="-install -silent" Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="StartApp" FileRef="MonitorExe" ExeCommand="" Execute="immediate" Return="asyncNoWait" />
+
+    <InstallExecuteSequence>
+      <Custom Action="QuitRunningApp" Before="InstallValidate" Condition="Installed OR WIX_UPGRADE_DETECTED" />
+      <Custom Action="InstallPawnIO" After="InstallFiles" Condition="NOT REMOVE AND NOT PAWNIO_INSTALLED" />
+      <Custom Action="RemovePortableService" Before="InstallServices" Condition="NOT Installed" />
+      <Custom Action="StartApp" After="InstallFinalize" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

@@ -1,0 +1,13 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Third-party driver setup and modules. Run fetch-pawnio.ps1.
+/driver/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vs/
+.idea/
+*.user

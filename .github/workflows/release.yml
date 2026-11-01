@@ -1,0 +1,120 @@
+# Pushing a tag like v0.2.0 builds a release and leaves it as a draft. Publishing the draft,
+# by hand, is what makes installed copies see the update.
+#
+# Signing runs if the SIGNPATH_* settings exist: see "Releasing" in ARCHITECTURE.md. Without
+# them, the release is unsigned. The build has no cache, so that nothing from an earlier run
+# can end up in a release.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  TAG: ${{ github.ref_name }}
+  REPOSITORY: ${{ github.repository }}
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches the version in Cargo.toml
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($env:TAG -ne "v$version") { throw "tag $env:TAG doesn't match version $version" }
+
+      - name: Fetch the PawnIO files
+        run: .\fetch-pawnio.ps1
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Build the exes
+        run: .\installer\build-release.ps1 -Stage Build -UpdateUrl "https://github.com/$env:REPOSITORY/releases/latest/download/latest.txt"
+
+      # ---- Sign the exes, so the packages contain signed copies.
+      - name: Upload the exes for signing
+        id: unsigned-exes
+        if: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-exes
+          path: |
+            target/release/monitor.exe
+            target/release/monitor-setup.exe
+      - name: Sign the exes
+        if: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: exes
+          github-artifact-id: ${{ steps.unsigned-exes.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: target/signed-exes
+      - name: Use the signed exes
+        if: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
+        run: Copy-Item target\signed-exes\*.exe target\release -Force
+
+      - name: Build the packages
+        run: .\installer\build-release.ps1 -Stage Package
+
+      # ---- Sign the MSI, now that it holds the signed exes.
+      - name: Upload the MSI for signing
+        id: unsigned-msi
+        if: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-msi
+          path: target/installer/*.msi
+      - name: Sign the MSI
+        if: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: msi
+          github-artifact-id: ${{ steps.unsigned-msi.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: target/signed-msi
+      - name: Use the signed MSI
+        if: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
+        run: Copy-Item target\signed-msi\*.msi target\installer -Force
+
+      - name: Check the signatures
+        if: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
+        run: |
+          foreach ($file in 'target\release\monitor.exe', 'target\release\monitor-setup.exe', (Get-Item target\installer\*.msi).FullName) {
+              $signature = Get-AuthenticodeSignature $file
+              "$file $($signature.Status) $($signature.SignerCertificate.Subject)"
+              if ($signature.Status -ne 'Valid') { throw "$file isn't properly signed" }
+          }
+
+      - name: Collect the release files
+        run: .\installer\make-release-files.ps1 -Tag $env:TAG -Repository $env:REPOSITORY -Out dist
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create $env:TAG (Get-ChildItem dist).FullName --draft --verify-tag --generate-notes --title "Monitor $env:TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'creating the release failed' }

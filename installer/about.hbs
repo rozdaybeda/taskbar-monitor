@@ -1,0 +1,14 @@
+Licences of the Rust libraries built into Monitor.
+
+{{#each licenses}}
+================================================================================
+{{name}}
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

@@ -1,0 +1,30 @@
+[package]
+name = "monitor-setup"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+
+[lib]
+name = "monitor_setup"
+path = "src/lib.rs"
+
+[[bin]]
+name = "monitor-setup"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+log = "0.4"
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Registry",
+  "Win32_System_Services",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
+
+[build-dependencies]
+embed-manifest = "1"
+winresource = "0.1"
