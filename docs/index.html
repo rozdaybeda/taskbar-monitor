@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taskbar Monitor: CPU, GPU and memory readings in your Windows taskbar</title>
+<meta name="description" content="A small Windows system monitor in pure Rust. Keeps CPU, GPU and memory readings in your taskbar, and includes benchmarks and stress tests. Free and open source.">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="icon.png">
+<style>
+  :root {
+    --bg: #14161a;
+    --card: #1e2127;
+    --line: #2c3038;
+    --text: #e6e8ec;
+    --muted: #a3a9b3;
+    --blue: #5aaaff;
+    --green: #78dc8c;
+    --orange: #f0965a;
+    --purple: #b48cff;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  }
+  a { color: var(--blue); }
+  a:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 4px; }
+  code { font: .9em Consolas, "Cascadia Mono", monospace; color: var(--text); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+  header.top { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; color: var(--text); text-decoration: none; }
+  .brand img { width: 28px; height: 28px; border-radius: 6px; }
+  nav a { color: var(--muted); text-decoration: none; margin-left: 20px; }
+  nav a:hover { color: var(--text); }
+
+  .hero { display: grid; grid-template-columns: 1fr 300px; gap: 56px; align-items: center; padding: 40px 0 72px; }
+  h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); line-height: 1.12; margin: 0 0 20px; letter-spacing: -.02em; }
+  .lead { font-size: 1.2rem; color: var(--muted); margin: 0 0 32px; max-width: 34em; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+  .btn { display: inline-block; padding: 12px 22px; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid var(--line); color: var(--text); }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: #0c1420; }
+  .btn.primary:hover { background: #7cbcff; border-color: #7cbcff; }
+  .note { color: var(--muted); font-size: .92rem; margin: 0; }
+  .shot { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 20px 60px rgba(0, 0, 0, .45); }
+
+  section { padding: 48px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 1.7rem; margin: 0 0 24px; letter-spacing: -.01em; }
+  h3 { font-size: 1.05rem; margin: 0 0 6px; }
+  p { margin: 0 0 14px; }
+  .muted { color: var(--muted); }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  .card p { margin: 0; color: var(--muted); font-size: .96rem; }
+  .card h3 { display: flex; align-items: center; gap: 10px; }
+  .card h3::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: var(--accent, var(--blue)); }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .two .card p + p { margin-top: 10px; }
+  .prose { max-width: 44em; }
+  .prose p { color: var(--muted); }
+
+  footer { border-top: 1px solid var(--line); padding: 28px 0 44px; color: var(--muted); font-size: .92rem; }
+  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+
+  @media (max-width: 800px) {
+    .hero { grid-template-columns: 1fr; gap: 36px; padding: 20px 0 48px; }
+    .shot { max-width: 300px; margin: 0 auto; }
+    .grid, .two { grid-template-columns: 1fr; }
+    nav { display: none; }
+    section { padding: 36px 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="./"><img src="icon.png" alt="" width="28" height="28">Taskbar Monitor</a>
+    <nav aria-label="Page sections">
+      <a href="#features">Features</a>
+      <a href="#download">Download</a>
+      <a href="#privacy">Privacy</a>
+      <a href="https://github.com/rozdaybeda/taskbar-monitor">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div>
+        <h1>Your PC's readings, right in the taskbar.</h1>
+        <p class="lead">A small Windows system monitor in pure Rust. See CPU, GPU and memory at a glance, and run benchmarks and stress tests when you need them.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/rozdaybeda/taskbar-monitor/releases/latest">Download for Windows</a>
+          <a class="btn" href="https://github.com/rozdaybeda/taskbar-monitor">View source</a>
+        </div>
+        <p class="note">Free and open source (MIT). Needs 64-bit Windows.</p>
+      </div>
+      <img class="shot" src="screenshot.png" width="416" height="949" alt="Monitor's window, showing live cards for the CPU, two GPUs and memory, each with temperature, load and a history graph">
+    </div>
+
+    <section id="features">
+      <h2>What it shows</h2>
+      <div class="grid">
+        <div class="card" style="--accent: var(--blue)">
+          <h3>CPU</h3>
+          <p>Temperature, frequency, power and load, including per-core load and clocks.</p>
+        </div>
+        <div class="card" style="--accent: var(--green)">
+          <h3>GPU</h3>
+          <p>Temperature, clock, load, power and video memory, for every NVIDIA and AMD GPU.</p>
+        </div>
+        <div class="card" style="--accent: var(--purple)">
+          <h3>Memory</h3>
+          <p>Usage and history.</p>
+        </div>
+        <div class="card" style="--accent: var(--orange)">
+          <h3>Taskbar widget</h3>
+          <p>Choose what it shows, and whether it sits on the taskbar or floats. A tray icon keeps it out of the way.</p>
+        </div>
+        <div class="card" style="--accent: var(--orange)">
+          <h3>Benchmarks and stress tests</h3>
+          <p>Bandwidth, latency and throughput for CPU, memory and GPU, plus CPU and GPU stress tests with a temperature limit.</p>
+        </div>
+        <div class="card" style="--accent: var(--orange)">
+          <h3>Device info</h3>
+          <p>Specs for your CPU and GPUs, in one place.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="download">
+      <h2>Download</h2>
+      <div class="two">
+        <div class="card">
+          <h3><span>Installer (<code>.msi</code>)</span></h3>
+          <p>Best for most people. Asks for admin rights once, and lets you choose CPU sensors, starting with Windows and update checks.</p>
+        </div>
+        <div class="card">
+          <h3><span>Portable (<code>.zip</code>)</span></h3>
+          <p>Unzip and run, with nothing to install. Asks for admin rights once only if you turn on CPU sensors. It doesn't check for updates.</p>
+        </div>
+      </div>
+      <p class="actions" style="margin-top: 24px"><a class="btn primary" href="https://github.com/rozdaybeda/taskbar-monitor/releases/latest">Get the latest release</a></p>
+      <p class="note">Releases aren't code-signed yet, so Windows may warn that the publisher is unknown.</p>
+    </section>
+
+    <section id="admin">
+      <div class="prose">
+        <h2>Why CPU sensors need admin rights</h2>
+        <p>Windows only lets kernel drivers read CPU temperature, frequency and power. Everything else works without admin rights, and the CPU sensors are optional.</p>
+        <p>Monitor uses the signed <a href="https://pawnio.eu">PawnIO</a> driver, whose modules allow only the CPU registers they list. A small Windows service reads the sensors and passes the values to the app, so the app itself never runs as admin or touches the driver.</p>
+        <p>Both can be removed from Installed apps in Windows Settings. PawnIO stays if you uninstall Monitor, because other apps can share it.</p>
+      </div>
+    </section>
+
+    <section id="privacy">
+      <div class="prose">
+        <h2>Privacy</h2>
+        <p>Monitor doesn't send your readings or anything about your PC anywhere. The one thing it does online is ask GitHub once a day whether there's a newer version, and GitHub sees your IP address, as with any web request. You can turn this off during install or in the tray menu. Portable copies never check.</p>
+        <p>This page has no analytics or tracking of its own. It's hosted on GitHub Pages.</p>
+      </div>
+    </section>
+
+    <section id="hardware">
+      <div class="prose">
+        <h2>Hardware support</h2>
+        <p>Developed on an AMD Ryzen with Radeon and NVIDIA GPUs. CPU sensors support AMD Zen and newer, and Intel CPUs, though the Intel code hasn't been tested on real hardware yet. Intel GPUs aren't supported. <a href="https://github.com/rozdaybeda/taskbar-monitor/issues">Reports are welcome</a>.</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>Taskbar Monitor is released under the <a href="https://github.com/rozdaybeda/taskbar-monitor/blob/main/LICENSE">MIT License</a>.</span>
+    <span><a href="https://github.com/rozdaybeda/taskbar-monitor">Source code</a> · <a href="https://github.com/rozdaybeda/taskbar-monitor/blob/main/installer/licenses/THIRD-PARTY-NOTICES.txt">Third-party notices</a></span>
+  </div>
+</footer>
+</body>
+</html>
