@@ -180,6 +180,27 @@ fn caption_button(
     response.on_hover_text(name)
 }
 
+/// A title bar button with words on it, which highlights like the symbol buttons.
+fn caption_text_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let size = egui::vec2(galley.size().x + 20.0, ui.available_height());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_white_alpha(24));
+    }
+    let color = egui::Color32::from_gray(if hovered { 235 } else { 170 });
+    let top_left = rect.center() - galley.size() / 2.0;
+    ui.painter().galley(top_left, galley, color);
+    response
+}
+
 /// Which edge or corner of a window of `size` the pointer is resizing from, if any.
 fn resize_direction(pos: egui::Pos2, size: egui::Vec2, edge: f32) -> Option<egui::ResizeDirection> {
     use egui::ResizeDirection::*;
@@ -569,13 +590,7 @@ impl MonitorApp {
                         if minimize.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
-                        ui.add_space(8.0);
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        let info = egui::Button::new(
-                            egui::RichText::new("Info").color(egui::Color32::from_gray(170)),
-                        )
-                        .frame(false);
-                        if ui.add(info).clicked() {
+                        if caption_text_button(ui, "Info").clicked() {
                             self.show_info = !self.show_info;
                         }
                     });

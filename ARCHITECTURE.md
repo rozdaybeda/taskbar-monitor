@@ -195,6 +195,10 @@ Without signing settings, releases are unsigned. To turn on SignPath:
    artifact configurations using the slugs `exes` and `msi`, from `installer/signpath/`.
 2. In the GitHub repo's Actions settings, add the secret `SIGNPATH_API_TOKEN` and the
    variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_POLICY_SLUG`.
+3. Once approved, replace "Releases aren't code-signed yet" in the README and the landing
+   page, and in their code signing policy sections say: "Free code signing provided by
+   SignPath.io, certificate by SignPath Foundation", linking to about.signpath.io and
+   signpath.org.
 
 `release.yml` then signs the exes before packaging them, signs the MSI after, and fails if a
 signature isn't valid. Its pinned `PawnIO_setup.exe` is already signed by its author.

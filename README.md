@@ -15,7 +15,7 @@ Get these from the **[latest release](https://github.com/rozdaybeda/taskbar-moni
 
 Needs 64-bit Windows.
 
-Releases aren't code-signed yet, so Windows may warn that the publisher is unknown.
+Releases aren't code-signed yet, so Windows may warn that the publisher is unknown. See the [code signing policy](#code-signing-policy).
 
 ## Features
 
@@ -37,6 +37,17 @@ Monitor uses the signed [PawnIO](https://pawnio.eu) driver, whose modules allow 
 ## Privacy
 
 Monitor doesn't send your readings or anything about your PC anywhere. The one thing it does online is ask GitHub once a day whether there's a newer version, and GitHub sees your IP address, as with any web request. You can turn this off during install or in the tray menu. Portable copies never check.
+
+## Code signing policy
+
+Releases aren't code-signed yet. We plan to apply for free code signing for open source projects from the SignPath Foundation. Until then, you can check a download against the `SHA256SUMS.txt` file in its release.
+
+Every release is built by [GitHub Actions](https://github.com/rozdaybeda/taskbar-monitor/actions) from the public source code, and `PawnIO_setup.exe` is included as signed by its own author.
+
+- Committers and reviewers: [rozdaybeda](https://github.com/rozdaybeda)
+- Approvers: [rozdaybeda](https://github.com/rozdaybeda)
+
+See [Privacy](#privacy) for what the program sends over the network, and how to turn it off.
 
 ## Uninstalling
 

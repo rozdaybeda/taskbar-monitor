@@ -12,6 +12,11 @@ fn main() {
         // Non-fatal: if no resource compiler is available, the build still succeeds.
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../assets/icon.ico");
+        // What Windows shows in the file's properties, and in the admin prompt when unsigned.
+        // Code signing requires these to be set.
+        res.set("ProductName", "Monitor");
+        res.set("FileDescription", "Monitor setup");
+        res.set("LegalCopyright", "Copyright (c) 2026 Oleksandr Rozdaibida");
         if let Err(e) = res.compile() {
             println!("cargo:warning=icon embed skipped: {e}");
         }

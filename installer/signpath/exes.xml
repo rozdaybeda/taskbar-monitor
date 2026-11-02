@@ -2,10 +2,10 @@
 <!-- Paste into a SignPath artifact configuration with the slug "exes". -->
 <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
   <zip-file>
-    <pe-file path="monitor.exe">
+    <pe-file path="monitor.exe" product-name="Monitor">
       <authenticode-sign/>
     </pe-file>
-    <pe-file path="monitor-setup.exe">
+    <pe-file path="monitor-setup.exe" product-name="Monitor">
       <authenticode-sign/>
     </pe-file>
   </zip-file>

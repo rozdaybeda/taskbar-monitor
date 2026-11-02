@@ -147,7 +147,7 @@
         </div>
       </div>
       <p class="actions" style="margin-top: 24px"><a class="btn primary" href="https://github.com/rozdaybeda/taskbar-monitor/releases/latest">Get the latest release</a></p>
-      <p class="note">Releases aren't code-signed yet, so Windows may warn that the publisher is unknown.</p>
+      <p class="note">Releases aren't code-signed yet, so Windows may warn that the publisher is unknown. See the <a href="#code-signing">code signing policy</a>.</p>
     </section>
 
     <section id="admin">
@@ -164,6 +164,16 @@
         <h2>Privacy</h2>
         <p>Monitor doesn't send your readings or anything about your PC anywhere. The one thing it does online is ask GitHub once a day whether there's a newer version, and GitHub sees your IP address, as with any web request. You can turn this off during install or in the tray menu. Portable copies never check.</p>
         <p>This page has no analytics or tracking of its own. It's hosted on GitHub Pages.</p>
+      </div>
+    </section>
+
+    <section id="code-signing">
+      <div class="prose">
+        <h2>Code signing policy</h2>
+        <p>Releases aren't code-signed yet. We plan to apply for free code signing for open source projects from the SignPath Foundation. Until then, you can check a download against the <code>SHA256SUMS.txt</code> file in its release.</p>
+        <p>Every release is built by <a href="https://github.com/rozdaybeda/taskbar-monitor/actions">GitHub Actions</a> from the public source code, and <code>PawnIO_setup.exe</code> is included as signed by its own author.</p>
+        <p>Committers and reviewers: <a href="https://github.com/rozdaybeda">rozdaybeda</a>. Approvers: <a href="https://github.com/rozdaybeda">rozdaybeda</a>.</p>
+        <p>See <a href="#privacy">Privacy</a> for what the program sends over the network, and how to turn it off.</p>
       </div>
     </section>
 
