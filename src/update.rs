@@ -1,6 +1,6 @@
 // Checks for a newer release: shortly after starting, then once a day, unless the user has
-// turned that off. This only tells the user. Installing is theirs to choose, by opening the
-// download link.
+// turned that off, and whenever they press the main window's button. This only tells the
+// user. Installing is theirs to choose, by opening the download link.
 //
 // The check reads a small text file from the URL set by MONITOR_UPDATE_URL at build time.
 // Release builds point it at the latest GitHub release. Builds without a URL never touch
@@ -29,7 +29,18 @@ pub struct Update {
     pub url: String,
 }
 
+/// What the main window's button shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Status {
+    Idle,
+    Checking,
+    UpToDate,
+    Failed(String),
+    Found(Update),
+}
+
 static AVAILABLE: Mutex<Option<Update>> = Mutex::new(None);
+static STATUS: Mutex<Status> = Mutex::new(Status::Idle);
 
 /// The newer release found by the last check, if any, while checks are on.
 pub fn available() -> Option<Update> {
@@ -38,6 +49,67 @@ pub fn available() -> Option<Update> {
         .unwrap()
         .clone()
         .filter(|_| crate::settings::check_updates())
+}
+
+/// A found update, or else how the last check from the button went. A manual check counts
+/// even with the automatic ones off, since the user asked for it.
+pub fn status() -> Status {
+    match available() {
+        Some(update) => Status::Found(update),
+        None => STATUS.lock().unwrap().clone(),
+    }
+}
+
+/// The button's text and hover text.
+pub fn button_text(status: &Status) -> (String, String) {
+    let current = concat!("You have version ", env!("CARGO_PKG_VERSION"));
+    match status {
+        Status::Idle => ("Check for updates".to_string(), current.to_string()),
+        Status::Checking => ("Checking…".to_string(), current.to_string()),
+        Status::UpToDate => (
+            "Up to date".to_string(),
+            format!("{current}, the latest. Click to check again."),
+        ),
+        Status::Failed(error) => (
+            "Check failed".to_string(),
+            format!("Couldn't check for updates ({error}). Click to try again."),
+        ),
+        Status::Found(update) => (
+            format!("Update to {}", update.version),
+            format!("{current}. Click to download {}.", update.version),
+        ),
+    }
+}
+
+/// Checks now, in the background, for the main window's button.
+pub fn check_now() {
+    let Some(url) = UPDATE_URL.filter(|_| can_check()) else {
+        return;
+    };
+    {
+        let mut status = STATUS.lock().unwrap();
+        if *status == Status::Checking {
+            return;
+        }
+        *status = Status::Checking;
+    }
+    std::thread::spawn(move || {
+        log::info!("update check from the button");
+        let result = check(url);
+        let status = match result {
+            Ok(Some(update)) => {
+                log::info!("update available: {} at {}", update.version, update.url);
+                *AVAILABLE.lock().unwrap() = Some(update.clone());
+                Status::Found(update)
+            }
+            Ok(None) => Status::UpToDate,
+            Err(e) => {
+                log::warn!("update check failed: {e}");
+                Status::Failed(e)
+            }
+        };
+        *STATUS.lock().unwrap() = status;
+    });
 }
 
 /// Whether this copy can check at all, so whether the setting means anything. The update
@@ -181,7 +253,11 @@ impl Drop for Handle {
 
 fn fetch(url: &str) -> Result<String, String> {
     let target = parse_url(url).ok_or("the update URL isn't valid")?;
-    let failed = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
+    // Windows has no text for most WinHTTP errors, leaving only the code.
+    let failed = |what: &str, e: windows::core::Error| match e.message() {
+        message if message.is_empty() => format!("{what}: error {:#x}", e.code().0),
+        message => format!("{what}: {message}"),
+    };
     unsafe {
         let session = Handle::new(
             WinHttpOpen(
@@ -266,6 +342,25 @@ mod tests {
         assert!(!check_is_due(true, Some(minute)));
         assert!(!check_is_due(false, None));
         assert!(!check_is_due(false, Some(day)));
+    }
+
+    #[test]
+    fn the_button_says_what_happened_and_what_a_click_does() {
+        let label = |status: Status| button_text(&status).0;
+        assert_eq!(label(Status::Idle), "Check for updates");
+        assert_eq!(label(Status::UpToDate), "Up to date");
+        let found = Update {
+            version: "9.9.9".to_string(),
+            url: "https://example.com/a.msi".to_string(),
+        };
+        assert_eq!(label(Status::Found(found.clone())), "Update to 9.9.9");
+        assert!(button_text(&Status::Found(found)).1.contains("download 9.9.9"));
+        let failed = button_text(&Status::Failed("the server answered 404".to_string()));
+        assert_eq!(failed.0, "Check failed");
+        assert_eq!(
+            failed.1,
+            "Couldn't check for updates (the server answered 404). Click to try again."
+        );
     }
 
     #[test]

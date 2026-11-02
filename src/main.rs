@@ -79,8 +79,10 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 720.0])
-            .with_min_inner_size([340.0, 520.0])
+            .with_min_inner_size([360.0, 520.0])
             .with_title("Monitor")
+            // Drawn by the app instead; see `title_bar`.
+            .with_decorations(false)
             .with_icon(Arc::new(app_icon())),
         ..Default::default()
     };
@@ -122,6 +124,147 @@ fn is_elevated() -> bool {
 #[cfg(not(windows))]
 fn is_elevated() -> bool {
     false
+}
+
+/// Checks for an update, or once there is one, downloads it.
+fn update_button(ui: &mut egui::Ui) {
+    let status = update::status();
+    let (text, hover) = update::button_text(&status);
+    let button = match &status {
+        update::Status::Found(_) => egui::Button::new(
+            egui::RichText::new(text).color(egui::Color32::WHITE).strong(),
+        )
+        .fill(egui::Color32::from_rgb(46, 110, 200)),
+        update::Status::Failed(_) => egui::Button::new(
+            egui::RichText::new(text).color(egui::Color32::from_rgb(235, 175, 105)),
+        ),
+        _ => egui::Button::new(text),
+    };
+    let response = ui
+        .add_enabled(status != update::Status::Checking, button)
+        .on_hover_text(hover);
+    if response.clicked() {
+        match status {
+            update::Status::Found(found) => tray::open_download(&found.url),
+            _ => update::check_now(),
+        }
+    }
+}
+
+const TITLE_BAR_HEIGHT: f32 = 38.0;
+const TITLE_BAR_FILL: egui::Color32 = egui::Color32::from_rgb(20, 22, 26);
+const CAPTION_BUTTON_W: f32 = 36.0;
+// Room for the title bar's buttons plus the version number itself.
+const VERSION_MIN_ROOM: f32 = 190.0;
+const RESIZE_EDGE: f32 = 4.0;
+const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+const REPOSITORY_URL: &str = "https://github.com/rozdaybeda/taskbar-monitor";
+const RELEASES_URL: &str = "https://github.com/rozdaybeda/taskbar-monitor/releases";
+
+/// A square button in the title bar, with its symbol drawn by `paint`.
+fn caption_button(
+    ui: &mut egui::Ui,
+    name: &str,
+    hover_fill: egui::Color32,
+    paint: impl FnOnce(&egui::Painter, egui::Rect, egui::Stroke),
+) -> egui::Response {
+    let size = egui::vec2(CAPTION_BUTTON_W, ui.available_height());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 0.0, hover_fill);
+    }
+    let stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(170));
+    let symbol =egui::Rect::from_center_size(rect.center(), egui::vec2(9.0, 9.0));
+    paint(ui.painter(), symbol, stroke);
+    response.on_hover_text(name)
+}
+
+/// Which edge or corner of a window of `size` the pointer is resizing from, if any.
+fn resize_direction(pos: egui::Pos2, size: egui::Vec2, edge: f32) -> Option<egui::ResizeDirection> {
+    use egui::ResizeDirection::*;
+    let (left, right) = (pos.x < edge, pos.x > size.x - edge);
+    let (top, bottom) = (pos.y < edge, pos.y > size.y - edge);
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(NorthWest),
+        (_, true, true, _) => Some(NorthEast),
+        (true, _, _, true) => Some(SouthWest),
+        (_, true, _, true) => Some(SouthEast),
+        (true, ..) => Some(West),
+        (_, true, ..) => Some(East),
+        (_, _, true, _) => Some(North),
+        (_, _, _, true) => Some(South),
+        _ => None,
+    }
+}
+
+/// The resize the pointer is in position for right now, if any.
+fn window_resize_direction(ctx: &egui::Context) -> Option<egui::ResizeDirection> {
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+        return None;
+    }
+    let pos = ctx.input(|i| i.pointer.hover_pos())?;
+    resize_direction(pos, ctx.screen_rect().size(), RESIZE_EDGE)
+}
+
+/// With no system frame, the window's edges have to offer resizing themselves.
+fn handle_window_resize(ctx: &egui::Context) {
+    let Some(direction) = window_resize_direction(ctx) else {
+        return;
+    };
+    ctx.set_cursor_icon(match direction {
+        egui::ResizeDirection::North | egui::ResizeDirection::South => egui::CursorIcon::ResizeVertical,
+        egui::ResizeDirection::East | egui::ResizeDirection::West => egui::CursorIcon::ResizeHorizontal,
+        egui::ResizeDirection::NorthEast | egui::ResizeDirection::SouthWest => egui::CursorIcon::ResizeNeSw,
+        egui::ResizeDirection::NorthWest | egui::ResizeDirection::SouthEast => egui::CursorIcon::ResizeNwSe,
+    });
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+    }
+}
+
+/// A short name for a GPU: "NVIDIA GeForce RTX 4070" is "RTX 4070", and "AMD Radeon 780M
+/// Graphics" is "Radeon 780M". Empty if nothing is left of it.
+fn short_gpu_name(name: &str) -> String {
+    let cleaned = ["(R)", "(TM)", "(tm)", "\u{ae}", "\u{2122}"]
+        .iter()
+        .fold(name.to_string(), |text, mark| text.replace(mark, ""));
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+    let kept: Vec<&str> = tokens
+        .iter()
+        .enumerate()
+        .filter(|&(i, token)| {
+            let is = |word: &str| token.eq_ignore_ascii_case(word);
+            let before_rx = tokens.get(i + 1).is_some_and(|next| next.eq_ignore_ascii_case("RX"));
+            !(is("NVIDIA") || is("GeForce") || is("AMD") || is("ATI") || is("Intel") || is("Graphics")
+                || (is("Radeon") && before_rx))
+        })
+        .map(|(_, token)| *token)
+        .collect();
+    kept.join(" ")
+}
+
+/// What to call each GPU. With only one, "GPU" says it all. Otherwise each gets its short
+/// name, numbered if it's shared with an identical card.
+fn gpu_titles(gpus: &[GpuState]) -> Vec<String> {
+    if gpus.len() < 2 {
+        return gpus.iter().map(|_| "GPU".to_string()).collect();
+    }
+    let names: Vec<String> = gpus.iter().map(|g| short_gpu_name(&g.name)).collect();
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            if name.is_empty() {
+                format!("GPU {}", i + 1)
+            } else if names.iter().filter(|n| *n == name).count() > 1 {
+                let same_before = names[..i].iter().filter(|n| *n == name).count();
+                format!("{name} #{}", same_before + 1)
+            } else {
+                name.clone()
+            }
+        })
+        .collect()
 }
 
 /// Load the window / taskbar icon from the baked-in raw RGBA bytes.
@@ -221,6 +364,9 @@ struct MonitorApp {
     show_info: bool,
     info_tab: usize,
     window_fitted: bool,
+    show_about: bool,
+    last_title_bar_press: Option<Instant>,
+    title_icon: egui::TextureHandle,
     bench: BenchRunner,
     enable_phase: Arc<Mutex<EnablePhase>>,
 }
@@ -303,6 +449,7 @@ impl MonitorApp {
         let enable_phase = Arc::new(Mutex::new(EnablePhase::Idle));
         let main_hwnd = native_hwnd(cc);
         if let Some(main_hwnd) = main_hwnd {
+            tray::round_window_corners(main_hwnd);
             tray::start(tray::TrayContext {
                 shared: shared.clone(),
                 egui_ctx: cc.egui_ctx.clone(),
@@ -319,9 +466,201 @@ impl MonitorApp {
             show_info: false,
             info_tab: 0,
             window_fitted: false,
+            show_about: false,
+            last_title_bar_press: None,
+            title_icon: {
+                let icon = app_icon();
+                cc.egui_ctx.load_texture(
+                    "title_icon",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [icon.width as usize, icon.height as usize],
+                        &icon.rgba,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            },
             bench: BenchRunner::new(bench_shared),
             enable_phase,
         }
+    }
+}
+
+impl MonitorApp {
+    /// The window's title bar, drawn here so it can match the window and hold its buttons.
+    fn title_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("title_bar")
+            .exact_height(TITLE_BAR_HEIGHT)
+            .show_separator_line(false)
+            .frame(egui::Frame::none().fill(TITLE_BAR_FILL))
+            .show(ctx, |ui| {
+                let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                // Added before the buttons, which then take priority over it.
+                let bar = ui.interact(ui.max_rect(), ui.id().with("drag"), egui::Sense::click_and_drag());
+                // As soon as the button goes down, like a real title bar, so the window
+                // doesn't lag behind the pointer. Windows then has the mouse until it's
+                // released, so a double click has to be spotted from the presses.
+                let pressed = ctx.input(|i| i.pointer.primary_pressed());
+                if pressed && bar.contains_pointer() && window_resize_direction(ctx).is_none() {
+                    let now = Instant::now();
+                    let second = self
+                        .last_title_bar_press
+                        .is_some_and(|last| now - last < DOUBLE_CLICK);
+                    if second {
+                        self.last_title_bar_press = None;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    } else {
+                        self.last_title_bar_press = Some(now);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                }
+
+                ui.horizontal_centered(|ui| {
+                    self.about_button(ui);
+                    // Not selectable here, so that dragging on the text moves the window.
+                    // The About window has them to copy.
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Monitor")
+                                .size(14.0)
+                                .color(egui::Color32::from_gray(205)),
+                        )
+                        .selectable(false),
+                    );
+                    // The first thing to go in a narrow window, since it would run into
+                    // the buttons.
+                    if ui.available_width() >= VERSION_MIN_ROOM {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_gray(140)),
+                            )
+                            .selectable(false),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        let plain = egui::Color32::from_white_alpha(24);
+                        let close = caption_button(ui, "Close", egui::Color32::from_rgb(196, 43, 28), |p, r, s| {
+                            p.line_segment([r.left_top(), r.right_bottom()], s);
+                            p.line_segment([r.right_top(), r.left_bottom()], s);
+                        });
+                        if close.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let name = if maximized { "Restore" } else { "Maximize" };
+                        let size = caption_button(ui, name, plain, |p, r, s| {
+                            if maximized {
+                                let back = r.shrink(1.0).translate(egui::vec2(1.5, -1.5));
+                                p.rect_stroke(back, 0.0, s);
+                                let front = r.shrink(1.0).translate(egui::vec2(-1.0, 1.0));
+                                p.rect_filled(front, 0.0, TITLE_BAR_FILL);
+                                p.rect_stroke(front, 0.0, s);
+                            } else {
+                                p.rect_stroke(r, 0.0, s);
+                            }
+                        });
+                        if size.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
+                        let minimize = caption_button(ui, "Minimize", plain, |p, r, s| {
+                            p.hline(r.x_range(), r.center().y, s);
+                        });
+                        if minimize.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                        ui.add_space(8.0);
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let info = egui::Button::new(
+                            egui::RichText::new("Info").color(egui::Color32::from_gray(170)),
+                        )
+                        .frame(false);
+                        if ui.add(info).clicked() {
+                            self.show_info = !self.show_info;
+                        }
+                    });
+                });
+            });
+    }
+
+    /// The icon at the start of the title bar, which opens the About window. A dot on it
+    /// says an update is waiting there.
+    fn about_button(&mut self, ui: &mut egui::Ui) {
+        let size = egui::vec2(CAPTION_BUTTON_W + 6.0, ui.available_height());
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "About"));
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_white_alpha(24));
+        }
+        let icon = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));
+        egui::Image::new(&self.title_icon).paint_at(ui, icon);
+        let update_found = matches!(update::status(), update::Status::Found(_));
+        if update_found {
+            ui.painter().circle(
+                icon.right_top(),
+                4.0,
+                egui::Color32::from_rgb(235, 175, 105),
+                egui::Stroke::new(1.5_f32, TITLE_BAR_FILL),
+            );
+        }
+        let hover = if update_found { "About Monitor: update available" } else { "About Monitor" };
+        if response.on_hover_text(hover).clicked() {
+            self.show_about = !self.show_about;
+        }
+    }
+
+    /// Who and what this is, in selectable text, and where to get a newer one.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if self.show_about && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_about = false;
+        }
+        let icon = &self.title_icon;
+        egui::Window::new("About")
+            .open(&mut self.show_about)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    ui.add(egui::Image::new(icon).fit_to_exact_size(egui::vec2(56.0, 56.0)));
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new("Monitor").size(20.0).strong())
+                            .selectable(true),
+                    );
+                    ui.add(
+                        egui::Label::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                            .selectable(true),
+                    );
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("CPU, GPU and memory readings in your taskbar.")
+                                .color(egui::Color32::from_gray(170)),
+                        )
+                        .selectable(true),
+                    );
+                    ui.add_space(12.0);
+                    if update::can_check() {
+                        update_button(ui);
+                    } else {
+                        ui.hyperlink_to("Get new versions", RELEASES_URL);
+                    }
+                    ui.add_space(12.0);
+                    ui.hyperlink_to("Project on GitHub", REPOSITORY_URL);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("MIT License")
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(140)),
+                        )
+                        .selectable(true),
+                    );
+                    ui.add_space(6.0);
+                });
+            });
     }
 }
 
@@ -339,9 +678,14 @@ impl eframe::App for MonitorApp {
                 log::info!("main window closed, sending it to the tray");
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.show_info = false;
+                self.show_about = false;
                 tray::hide_main_window(hwnd);
             }
         }
+
+        handle_window_resize(ctx);
+        self.title_bar(ctx);
+        self.about_window(ctx);
 
         // Snapshot the shared state once per frame.
         let snap = {
@@ -419,16 +763,6 @@ impl eframe::App for MonitorApp {
                     .fill(egui::Color32::from_rgb(20, 22, 26)),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(egui::RichText::new("System Monitor").size(20.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Info").clicked() {
-                            self.show_info = !self.show_info;
-                        }
-                    });
-                });
-                ui.add_space(10.0);
-
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
@@ -480,22 +814,18 @@ impl eframe::App for MonitorApp {
 
                         // One card per GPU.
                         let empty = Series::default();
+                        let titles = gpu_titles(&snap.gpus);
                         for (i, gpu) in snap.gpus.iter().enumerate() {
-                            let title = if snap.gpus.len() > 1 {
-                                format!("GPU {}", i + 1)
-                            } else {
-                                "GPU".to_string()
-                            };
                             metric_card(
                                 ui,
-                                &title,
+                                &titles[i],
                                 Some(gpu.name.as_str()),
                                 GPU_ACCENTS[i % GPU_ACCENTS.len()],
                                 &[
                                     Stat::temp(gpu.temp),
                                     Stat::new("LOAD", gpu.load.map(|v| format!("{v:.0}%")))
                                         .with_hint(gpu.load_source),
-                                    Stat::new("CLK", gpu.clock.map(|v| format!("{v:.0} MHz"))),
+                                    Stat::new("FREQ", gpu.clock.map(|v| format!("{v:.0} MHz"))),
                                     Stat::new("PWR", gpu.power.map(|v| format!("{v:.0} W"))),
                                 ],
                                 None,
@@ -1105,7 +1435,7 @@ fn memory_card(
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(4.0, 16.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, 2.0, accent);
-                ui.label(egui::RichText::new("MEM").size(15.0).strong());
+                ui.label(egui::RichText::new("Memory").size(15.0).strong());
                 if total_gb > 0.0 {
                     ui.label(
                         egui::RichText::new(format!("{used_gb:.1} / {total_gb:.1} GB"))
@@ -1220,6 +1550,64 @@ fn temp_color(t: f32) -> egui::Color32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gpu_names_lose_the_marketing_words() {
+        for (full, short) in [
+            ("NVIDIA GeForce RTX 4070 SUPER", "RTX 4070 SUPER"),
+            ("NVIDIA GeForce GTX 1050 Ti", "GTX 1050 Ti"),
+            ("NVIDIA Quadro RTX 5000", "Quadro RTX 5000"),
+            ("AMD Radeon RX 7900 XTX", "RX 7900 XTX"),
+            ("AMD Radeon 780M Graphics", "Radeon 780M"),
+            ("AMD Radeon(TM) Graphics", "Radeon"),
+            ("Intel(R) UHD Graphics 770", "UHD 770"),
+            ("Intel(R) Arc(TM) A770 Graphics", "Arc A770"),
+            ("Microsoft Basic Display Adapter", "Microsoft Basic Display Adapter"),
+            ("", ""),
+        ] {
+            assert_eq!(super::short_gpu_name(full), short, "{full}");
+        }
+    }
+
+    fn gpus(names: &[&str]) -> Vec<super::GpuState> {
+        names
+            .iter()
+            .map(|name| super::GpuState {
+                name: name.to_string(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gpu_titles_use_names_only_when_there_are_several() {
+        assert_eq!(super::gpu_titles(&gpus(&["NVIDIA GeForce RTX 4070"])), ["GPU"]);
+        assert_eq!(
+            super::gpu_titles(&gpus(&["AMD Radeon 780M Graphics", "NVIDIA GeForce RTX 4070"])),
+            ["Radeon 780M", "RTX 4070"]
+        );
+        assert_eq!(
+            super::gpu_titles(&gpus(&["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 4090", "Intel(R) UHD Graphics 770"])),
+            ["RTX 4090 #1", "RTX 4090 #2", "UHD 770"]
+        );
+        assert_eq!(super::gpu_titles(&gpus(&["", "AMD"])), ["GPU 1", "GPU 2"]);
+        assert!(super::gpu_titles(&[]).is_empty());
+    }
+
+    #[test]
+    fn window_edges_offer_resizing_only_at_the_very_edge() {
+        use egui::{pos2, vec2, ResizeDirection::*};
+        let at = |x, y| super::resize_direction(pos2(x, y), vec2(400.0, 700.0), 5.0);
+        assert_eq!(at(200.0, 300.0), None);
+        assert_eq!(at(2.0, 300.0), Some(West));
+        assert_eq!(at(398.0, 300.0), Some(East));
+        assert_eq!(at(200.0, 2.0), Some(North));
+        assert_eq!(at(200.0, 698.0), Some(South));
+        assert_eq!(at(2.0, 2.0), Some(NorthWest));
+        assert_eq!(at(398.0, 2.0), Some(NorthEast));
+        assert_eq!(at(2.0, 698.0), Some(SouthWest));
+        assert_eq!(at(398.0, 698.0), Some(SouthEast));
+    }
+
     use super::*;
 
     #[test]

@@ -24,14 +24,16 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use eframe::egui;
-use windows::core::{w, HSTRING, PCWSTR, VARIANT};
+use windows::core::{w, HSTRING, PCSTR, PCWSTR, VARIANT};
 use windows::Win32::Foundation::{
     BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, TreeScope_Descendants,
@@ -76,6 +78,7 @@ const WIDGET_PAD_X: f32 = 12.0;
 const WIDGET_PAD_Y: f32 = 8.0;
 const WIDGET_ROW_H: f32 = 20.0;
 const WIDGET_TEXT_PX: f32 = 13.0;
+const WIDGET_LABEL_GAP: f32 = 12.0;
 const WIDGET_RADIUS: f32 = 10.0;
 const WIDGET_MARGIN: i32 = 16;
 const PANEL: Rgba = Rgba(28, 30, 36, 165);
@@ -87,9 +90,10 @@ const NO_VALUE: &str = "—";
 
 // Taskbar layout at 100% display scale: rows stack in pairs, in columns.
 const TASKBAR_ROWS_PER_COLUMN: usize = 2;
-const TASKBAR_TEXT_PX: f32 = 12.0;
+const TASKBAR_TEXT_PX: f32 = 13.0;
 const TASKBAR_ROW_H: f32 = 17.0;
 const TASKBAR_LABEL_GAP: f32 = 6.0;
+const TASKBAR_VALUE_GAP: f32 = 12.0;
 const TASKBAR_COLUMN_GAP: f32 = 14.0;
 const TASKBAR_PAD_X: f32 = 6.0;
 const TASKBAR_TRAY_GAP: i32 = 4;
@@ -176,6 +180,20 @@ unsafe fn set_cloaked(hwnd: HWND, cloaked: bool) {
         &value as *const BOOL as *const c_void,
         std::mem::size_of::<BOOL>() as u32,
     );
+}
+
+/// Windows 11 squares off a window with no frame unless it's asked not to. Older versions
+/// don't know the setting, and stay square.
+pub fn round_window_corners(main_hwnd: isize) {
+    let preference = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            HWND(main_hwnd as *mut c_void),
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as *const c_void,
+            std::mem::size_of_val(&preference) as u32,
+        );
+    }
 }
 
 unsafe fn set_tool_window(hwnd: HWND, tool: bool) {
@@ -316,54 +334,36 @@ impl WidgetItem {
         })
     }
 
-    /// Short name for the widget row.
-    fn row_label(self, gpu_count: usize) -> String {
+    /// Short name for the widget row. The value's unit says which reading it is, except
+    /// for VRAM, whose gigabytes could pass for the system memory.
+    fn row_label(self, gpu_titles: &[String]) -> String {
         match self {
-            Self::CpuTemp => "CPU temp".to_string(),
-            Self::CpuLoad => "CPU load".to_string(),
-            Self::CpuFreq => "CPU freq".to_string(),
-            Self::CpuPower => "CPU power".to_string(),
+            Self::CpuTemp | Self::CpuLoad | Self::CpuFreq | Self::CpuPower => "CPU".to_string(),
             Self::Memory => "Memory".to_string(),
-            Self::Gpu(i, metric) => {
-                let name = match metric {
-                    GpuMetric::Temp => "temp",
-                    GpuMetric::Load => "load",
-                    GpuMetric::Clock => "clock",
-                    GpuMetric::Power => "power",
-                    GpuMetric::Vram => "VRAM",
-                };
-                format!("{} {name}", gpu_title(i, gpu_count))
-            }
+            Self::Gpu(i, GpuMetric::Vram) => format!("{} VRAM", gpu_title(i, gpu_titles)),
+            Self::Gpu(i, _) => gpu_title(i, gpu_titles).to_string(),
         }
     }
 
-    /// Full name for the menu.
-    fn menu_label(self, gpu_count: usize) -> String {
+    /// Its name in the menu, under its group's heading.
+    fn menu_label(self) -> &'static str {
         match self {
-            Self::CpuTemp => "CPU temperature".to_string(),
-            Self::CpuLoad => "CPU load".to_string(),
-            Self::CpuFreq => "CPU frequency".to_string(),
-            Self::CpuPower => "CPU power".to_string(),
-            Self::Memory => "Memory used".to_string(),
-            Self::Gpu(i, metric) => {
-                let name = match metric {
-                    GpuMetric::Temp => "temperature",
-                    GpuMetric::Load => "load",
-                    GpuMetric::Clock => "clock",
-                    GpuMetric::Power => "power",
-                    GpuMetric::Vram => "VRAM used",
-                };
-                format!("{} {name}", gpu_title(i, gpu_count))
-            }
+            Self::CpuTemp | Self::Gpu(_, GpuMetric::Temp) => "Temperature",
+            Self::CpuLoad | Self::Gpu(_, GpuMetric::Load) => "Load",
+            Self::CpuFreq | Self::Gpu(_, GpuMetric::Clock) => "Frequency",
+            Self::CpuPower | Self::Gpu(_, GpuMetric::Power) => "Power",
+            Self::Gpu(_, GpuMetric::Vram) => "VRAM used",
+            Self::Memory => "Memory used",
         }
     }
 
-    /// Items in the same group sit together in the menu, between separators.
-    fn group(self) -> usize {
+    /// The menu heading for the items it's grouped with. Memory is one item that names
+    /// itself, so it has none.
+    fn menu_heading(self, gpu_titles: &[String]) -> Option<String> {
         match self {
-            Self::CpuTemp | Self::CpuLoad | Self::CpuFreq | Self::CpuPower => 0,
-            Self::Gpu(i, _) => i + 1,
-            Self::Memory => usize::MAX,
+            Self::CpuTemp | Self::CpuLoad | Self::CpuFreq | Self::CpuPower => Some("CPU".to_string()),
+            Self::Gpu(i, _) => Some(gpu_title(i, gpu_titles).to_string()),
+            Self::Memory => None,
         }
     }
 }
@@ -409,12 +409,8 @@ impl WidgetMode {
 }
 
 /// Same names as the main window's cards.
-fn gpu_title(index: usize, gpu_count: usize) -> String {
-    if gpu_count > 1 {
-        format!("GPU {}", index + 1)
-    } else {
-        "GPU".to_string()
-    }
+fn gpu_title(index: usize, gpu_titles: &[String]) -> &str {
+    gpu_titles.get(index).map_or("GPU", String::as_str)
 }
 
 fn default_items() -> Vec<WidgetItem> {
@@ -497,8 +493,17 @@ fn read_readings() -> Readings {
 #[derive(Clone, PartialEq, Debug)]
 struct Row {
     label: String,
-    value: String,
+    values: Vec<RowValue>,
+}
+
+/// One reading on a row.
+#[derive(Clone, PartialEq, Debug)]
+struct RowValue {
+    text: String,
     color: Rgba,
+    /// The widest this reading gets, whose width it's given whatever it says now, so the
+    /// widget doesn't shift about as numbers gain and lose digits.
+    widest: String,
 }
 
 fn percent(v: Option<f32>) -> String {
@@ -519,12 +524,29 @@ fn temp_row_value(v: Option<f32>) -> (String, Rgba) {
     }
 }
 
-/// The widget's rows. While the sensors are off, the first row that needs them
-/// says what to do and any others stay blank, rather than repeating it.
+/// The widest text `item` normally shows. Digits are all the same width in Segoe UI, so
+/// any number with the most digits will do.
+fn widest_text(item: WidgetItem, r: &Readings) -> String {
+    let of_total = |total_gb: f32| format!("{total_gb:.1} / {total_gb:.0} GB");
+    match item {
+        WidgetItem::CpuTemp | WidgetItem::Gpu(_, GpuMetric::Temp) => "100 °C".to_string(),
+        WidgetItem::CpuLoad | WidgetItem::Gpu(_, GpuMetric::Load) => "100%".to_string(),
+        WidgetItem::CpuFreq => "8.88 GHz".to_string(),
+        WidgetItem::Gpu(_, GpuMetric::Clock) => "8888 MHz".to_string(),
+        WidgetItem::CpuPower | WidgetItem::Gpu(_, GpuMetric::Power) => "888 W".to_string(),
+        WidgetItem::Memory => of_total(r.mem_total_gb),
+        WidgetItem::Gpu(i, GpuMetric::Vram) => {
+            of_total(r.gpus.get(i).and_then(|g| g.mem_total_mb).unwrap_or(0.0) / 1024.0)
+        }
+    }
+}
+
+/// The widget's rows, one line per device. While the sensors are off, the first reading
+/// that needs them says what to do, and the others are left out rather than repeating it.
 fn widget_rows(items: &[WidgetItem], r: &Readings) -> Vec<Row> {
-    let gpu_count = r.gpus.len();
+    let gpu_titles = crate::gpu_titles(&r.gpus);
     let mut hint_shown = false;
-    let mut rows = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     for &item in items {
         let (mut value, mut color) = (NO_VALUE.to_string(), TEXT_MAIN);
         match item {
@@ -578,17 +600,36 @@ fn widget_rows(items: &[WidgetItem], r: &Readings) -> Vec<Row> {
                 hint_shown = true;
             }
         }
-        rows.push(Row {
-            label: item.row_label(gpu_count),
-            value,
+        let label = item.row_label(&gpu_titles);
+        let reading = RowValue {
+            text: value,
             color,
-        });
+            widest: widest_text(item, r),
+        };
+        match rows.last_mut() {
+            Some(last) if last.label == label => last.values.push(reading),
+            _ => rows.push(Row {
+                label,
+                values: vec![reading],
+            }),
+        }
+    }
+    for row in &mut rows {
+        // A line of dashes says nothing: one will do if there's nothing else on it.
+        if row.values.iter().any(|value| value.text != NO_VALUE) {
+            row.values.retain(|value| value.text != NO_VALUE);
+        } else {
+            row.values.truncate(1);
+        }
     }
     if rows.is_empty() {
         rows.push(Row {
             label: "Monitor".to_string(),
-            value: NO_VALUE.to_string(),
-            color: TEXT_MAIN,
+            values: vec![RowValue {
+                text: NO_VALUE.to_string(),
+                color: TEXT_MAIN,
+                widest: NO_VALUE.to_string(),
+            }],
         });
     }
     rows
@@ -718,25 +759,18 @@ impl Drop for Dib {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Align {
-    Left,
-    Right,
-}
-
 struct TextStyle {
     px: i32,
-    bold: bool,
     color: Rgba,
 }
 
-unsafe fn make_font(px: i32, bold: bool) -> HFONT {
+unsafe fn make_font(px: i32) -> HFONT {
     CreateFontW(
         -px,
         0,
         0,
         0,
-        if bold { 700 } else { 400 },
+        400,
         0,
         0,
         0,
@@ -756,11 +790,11 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 /// (width in pixels) of `text`.
-unsafe fn text_width(text: &str, px: i32, bold: bool) -> i32 {
+unsafe fn text_width(text: &str, px: i32) -> i32 {
     let Some(dib) = Dib::new(1, 1) else {
         return 0;
     };
-    let font = make_font(px, bold);
+    let font = make_font(px);
     let previous = SelectObject(dib.dc, font);
     let mut size = SIZE::default();
     let _ = GetTextExtentPoint32W(dib.dc, &wide(text), &mut size);
@@ -771,23 +805,16 @@ unsafe fn text_width(text: &str, px: i32, bold: bool) -> i32 {
 
 /// GDI can't draw onto alpha, so draw white on black off to the side and use the
 /// result as the text's coverage mask.
-unsafe fn draw_text(canvas: &mut Canvas, text: &str, x: i32, y: i32, align: Align, style: &TextStyle) {
+unsafe fn draw_text(canvas: &mut Canvas, text: &str, x: i32, y: i32, style: &TextStyle) {
     let Some(mut dib) = Dib::new(canvas.w, canvas.h) else {
         return;
     };
     dib.pixels_mut().fill([0; 4]);
-    let font = make_font(style.px, style.bold);
+    let font = make_font(style.px);
     let previous = SelectObject(dib.dc, font);
     SetBkMode(dib.dc, TRANSPARENT);
     SetTextColor(dib.dc, COLORREF(0x00FF_FFFF));
-    let chars = wide(text);
-    let mut size = SIZE::default();
-    let _ = GetTextExtentPoint32W(dib.dc, &chars, &mut size);
-    let left = match align {
-        Align::Left => x,
-        Align::Right => x - size.cx,
-    };
-    let _ = TextOutW(dib.dc, left, y, &chars);
+    let _ = TextOutW(dib.dc, x, y, &wide(text));
     SelectObject(dib.dc, previous);
     let _ = DeleteObject(font);
 
@@ -897,6 +924,7 @@ unsafe fn run() {
         return;
     };
 
+    follow_windows_theme_in_menus(tray_hwnd);
     set_main_window_icons(instance);
     // The exact tray size from the icon file, drawn for that size; the built-in
     // bitmap is only the fallback for builds made without a resource compiler.
@@ -945,6 +973,28 @@ unsafe fn run() {
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+}
+
+/// Makes the menus dark when Windows' apps are set to dark. The only way is uxtheme's
+/// unnamed exports, which Windows' own apps and many others rely on. If they ever go away,
+/// the menus simply stay light.
+unsafe fn follow_windows_theme_in_menus(owner: HWND) {
+    const ALLOW_DARK: i32 = 1;
+    let Ok(uxtheme) = LoadLibraryW(w!("uxtheme.dll")) else {
+        return;
+    };
+    let by_ordinal = |ordinal: usize| GetProcAddress(uxtheme, PCSTR(ordinal as *const u8));
+    let (Some(allow_window), Some(set_app_mode), Some(flush)) =
+        (by_ordinal(133), by_ordinal(135), by_ordinal(136))
+    else {
+        return;
+    };
+    type AllowWindow = unsafe extern "system" fn(HWND, BOOL) -> BOOL;
+    type SetAppMode = unsafe extern "system" fn(i32) -> i32;
+    type Flush = unsafe extern "system" fn();
+    let _ = std::mem::transmute::<_, SetAppMode>(set_app_mode)(ALLOW_DARK);
+    let _ = std::mem::transmute::<_, AllowWindow>(allow_window)(owner, BOOL(1));
+    std::mem::transmute::<_, Flush>(flush)();
 }
 
 /// The exe's embedded icon at the size closest to `size`. winresource gives it ID 1.
@@ -1006,10 +1056,17 @@ unsafe fn show_update_notification(hwnd: HWND) {
 
 unsafe fn open_update_page() {
     if let Some(update) = crate::update::available() {
+        open_download(&update.url);
+    }
+}
+
+/// Opens an update's link, which the update check has already made sure is a web address.
+pub fn open_download(url: &str) {
+    unsafe {
         ShellExecuteW(
             None,
             w!("open"),
-            &HSTRING::from(update.url),
+            &HSTRING::from(url),
             PCWSTR::null(),
             PCWSTR::null(),
             SW_SHOWNORMAL,
@@ -1209,22 +1266,28 @@ unsafe fn set_widget_monitor(monitor: &MonitorEntry) {
     save_settings();
 }
 
-/// The checklist of readings the widget can show.
-unsafe fn items_menu(catalog: &[WidgetItem], gpu_count: usize) -> Option<HMENU> {
+/// The checklist of readings the widget can show, under a heading for each device.
+unsafe fn items_menu(catalog: &[WidgetItem], gpu_titles: &[String]) -> Option<HMENU> {
     let menu = CreatePopupMenu().ok()?;
     let selected = UI.with(|ui| ui.items.borrow().clone());
-    let mut group = None;
+    let mut heading: Option<Option<String>> = None;
     for (index, &item) in catalog.iter().enumerate() {
-        if group.is_some_and(|g| g != item.group()) {
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let this_heading = item.menu_heading(gpu_titles);
+        if heading.as_ref() != Some(&this_heading) {
+            if heading.is_some() {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            if let Some(title) = &this_heading {
+                let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &HSTRING::from(title.as_str()));
+            }
+            heading = Some(this_heading);
         }
-        group = Some(item.group());
         let checked = selected.contains(&item);
         let mut flags = MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED };
         if checked && selected.len() == 1 {
             flags |= MF_GRAYED; // the last one can't be switched off
         }
-        let label = HSTRING::from(item.menu_label(gpu_count));
+        let label = HSTRING::from(item.menu_label());
         let _ = AppendMenuW(menu, flags, MENU_ITEM_BASE + index, &label);
     }
     Some(menu)
@@ -1243,17 +1306,23 @@ unsafe fn toggle_item(item: WidgetItem) {
 unsafe fn show_menu() {
     let readings = read_readings();
     let state = readings.state;
-    let gpu_count = readings.gpus.len();
-    let catalog = all_items(gpu_count);
+    let gpu_titles = crate::gpu_titles(&readings.gpus);
+    let catalog = all_items(gpu_titles.len());
     let Ok(menu) = CreatePopupMenu() else {
         return;
     };
     let visible = UI.with(|ui| ui.widget_visible.get());
     let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("&Open Monitor"));
+    // Shown in bold, as what a click on the tray icon does.
+    let _ = SetMenuDefaultItem(menu, MENU_OPEN as u32, 0);
     if let Some(update) = crate::update::available() {
         let label = HSTRING::from(format!("&Download update {}", update.version));
         let _ = AppendMenuW(menu, MF_STRING, MENU_UPDATE, &label);
     }
+    if state == TempState::Off {
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ENABLE, w!("&Enable CPU temperature"));
+    }
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let check = if visible { MF_CHECKED } else { MF_UNCHECKED };
     let _ = AppendMenuW(menu, MF_STRING | check, MENU_WIDGET, w!("Show &widget"));
     let hidden = UI.with(|ui| ui.hidden_rows.get());
@@ -1261,8 +1330,8 @@ unsafe fn show_menu() {
         let label = HSTRING::from(format!("Taskbar is full: {hidden} hidden"));
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &label);
     }
-    if let Some(items) = items_menu(&catalog, gpu_count) {
-        let _ = AppendMenuW(menu, MF_POPUP, items.0 as usize, w!("Widget &items"));
+    if let Some(items) = items_menu(&catalog, &gpu_titles) {
+        let _ = AppendMenuW(menu, MF_POPUP, items.0 as usize, w!("Widget &readings"));
     }
     if let Some(modes) = modes_menu() {
         let _ = AppendMenuW(menu, MF_POPUP, modes.0 as usize, w!("Widget &position"));
@@ -1272,9 +1341,6 @@ unsafe fn show_menu() {
         if let Some(submenu) = monitors_menu(&monitors) {
             let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, w!("Widget &monitor"));
         }
-    }
-    if state == TempState::Off {
-        let _ = AppendMenuW(menu, MF_STRING, MENU_ENABLE, w!("&Enable CPU temperature"));
     }
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let auto_start = crate::settings::auto_start();
@@ -1815,93 +1881,248 @@ fn taskbar_rows_per_column(height: i32, row_h: i32) -> usize {
     }
 }
 
-/// The (label, value) width of each column, in pixels.
-unsafe fn taskbar_column_widths(columns: &[&[Row]], text_px: i32) -> Vec<(i32, i32)> {
-    columns
-        .iter()
-        .map(|column| {
-            let label = column
+/// Spacing in the taskbar layout, in pixels.
+#[derive(Clone, Copy)]
+struct TaskbarGaps {
+    label: i32,
+    value: i32,
+    column: i32,
+    pad: i32,
+}
+
+/// One way of fitting the readings on the taskbar.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct TaskbarLayout {
+    labels: bool,
+    rows: usize,
+    /// How many readings to keep on the first row, once it's the only one.
+    first_row_values: usize,
+}
+
+impl TaskbarLayout {
+    /// How many of a row's `total` readings this layout shows; `None` if it drops the row.
+    fn values_kept(self, row: usize, total: usize) -> Option<usize> {
+        if row >= self.rows {
+            None
+        } else if self.rows == 1 {
+            Some(total.min(self.first_row_values))
+        } else {
+            Some(total)
+        }
+    }
+}
+
+/// The layouts to try, fullest first. Labels go first, since the units mostly say what's
+/// what. Then rows from the end, then readings from the end of the one row left.
+fn taskbar_layouts(rows: usize, first_row_values: usize) -> Vec<TaskbarLayout> {
+    let with = |labels, rows, first_row_values| TaskbarLayout {
+        labels,
+        rows,
+        first_row_values,
+    };
+    let mut layouts = vec![
+        with(true, rows, first_row_values),
+        with(false, rows, first_row_values),
+    ];
+    layouts.extend((1..rows).rev().map(|r| with(false, r, first_row_values)));
+    layouts.extend((1..first_row_values).rev().map(|v| with(false, 1, v)));
+    layouts
+}
+
+/// The measured size of one row's text, in pixels.
+#[derive(Clone, Debug)]
+struct RowWidths {
+    label: i32,
+    values: Vec<i32>,
+}
+
+unsafe fn measure_rows(rows: &[Row], text_px: i32) -> Vec<RowWidths> {
+    rows.iter()
+        .map(|row| RowWidths {
+            label: text_width(&row.label, text_px),
+            values: row
+                .values
                 .iter()
-                .map(|r| text_width(&r.label, text_px, false))
-                .max()
-                .unwrap_or(0);
-            let value = column
-                .iter()
-                .map(|r| text_width(&r.value, text_px, true))
-                .max()
-                .unwrap_or(0);
-            (label, value)
+                .map(|value| text_width(&value.text, text_px).max(text_width(&value.widest, text_px)))
+                .collect(),
         })
         .collect()
 }
 
-/// What taskbar layout `level` means for `columns` columns: whether labels are drawn,
-/// and how many columns. Level 0 is everything. Next the labels go, since readings are
-/// mostly recognisable by their units, then columns from the end, then the widget.
-fn taskbar_level_parts(level: usize, columns: usize) -> (bool, usize) {
-    if level == 0 {
-        (true, columns)
-    } else {
-        (false, (columns + 1).saturating_sub(level))
+/// Where a block of rows puts its readings, so that the same reading on different rows
+/// lines up: temperature under temperature.
+#[derive(Clone, Debug, PartialEq)]
+struct ValueGrid {
+    /// The width of each slot. A row with one reading doesn't set these, so that a long
+    /// one like the memory doesn't push apart every row above it.
+    slots: Vec<i32>,
+    gap: i32,
+    width: i32,
+}
+
+impl ValueGrid {
+    fn new<'a>(rows: impl Iterator<Item = &'a [i32]> + Clone, gap: i32) -> Self {
+        let mut slots: Vec<i32> = Vec::new();
+        for values in rows.clone().filter(|values| values.len() > 1) {
+            for (i, &width) in values.iter().enumerate() {
+                match slots.get_mut(i) {
+                    Some(slot) => *slot = (*slot).max(width),
+                    None => slots.push(width),
+                }
+            }
+        }
+        let grid = slots.iter().sum::<i32>() + gap * (slots.len() as i32 - 1).max(0);
+        let single = rows
+            .filter(|values| values.len() == 1)
+            .map(|values| values[0])
+            .max()
+            .unwrap_or(0);
+        Self {
+            slots,
+            gap,
+            width: grid.max(single),
+        }
+    }
+
+    /// How far from the start of the values the reading in `slot` ends, so that units line
+    /// up: "12 W" over " 6 W". One too wide for its slot, like the memory, ends with the
+    /// whole grid instead.
+    fn right_edge(&self, slot: usize, reading_width: i32) -> i32 {
+        match self.slots.get(slot) {
+            Some(&width) if reading_width <= width => {
+                self.slots[..slot].iter().map(|w| w + self.gap).sum::<i32>() + width
+            }
+            _ => self.width,
+        }
     }
 }
 
-/// The fullest layout that fits in `room` pixels, given the level `shown` last.
+/// Each column's label width and value grid in `layout`, with its rows stacked
+/// `per_column` high.
+fn taskbar_columns(
+    layout: TaskbarLayout,
+    widths: &[RowWidths],
+    per_column: usize,
+    gaps: TaskbarGaps,
+) -> Vec<(i32, ValueGrid)> {
+    let kept: Vec<(i32, &[i32])> = widths
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| {
+            let count = layout.values_kept(i, row.values.len())?;
+            Some((row.label, &row.values[..count]))
+        })
+        .collect();
+    kept.chunks(per_column.max(1))
+        .map(|column| {
+            let label = column.iter().map(|c| c.0).max().unwrap_or(0);
+            let grid = ValueGrid::new(column.iter().map(|c| c.1), gaps.value);
+            (if layout.labels { label } else { 0 }, grid)
+        })
+        .collect()
+}
+
+fn taskbar_layout_width(
+    layout: TaskbarLayout,
+    widths: &[RowWidths],
+    per_column: usize,
+    gaps: TaskbarGaps,
+) -> i32 {
+    let columns = taskbar_columns(layout, widths, per_column, gaps);
+    let label_gap = if layout.labels { gaps.label } else { 0 };
+    let content: i32 = columns.iter().map(|(label, grid)| label + label_gap + grid.width).sum();
+    content + gaps.column * (columns.len() as i32 - 1).max(0) + gaps.pad * 2
+}
+
+/// The index of the fullest of `layouts` that fits in `room` pixels, given the one `shown`
+/// last, or `layouts.len()` if none does.
 fn taskbar_level(
-    widths: &[(i32, i32)],
-    (label_gap, column_gap, pad): (i32, i32, i32),
+    layouts: &[TaskbarLayout],
+    widths: &[RowWidths],
+    per_column: usize,
+    gaps: TaskbarGaps,
     room: i32,
     regrow_margin: i32,
     shown: usize,
 ) -> usize {
-    let hidden = widths.len() + 1;
-    let fits = |level: usize, room: i32| {
-        let (labels, count) = taskbar_level_parts(level, widths.len());
-        let width = if labels {
-            taskbar_widget_width(widths, label_gap, column_gap, pad)
-        } else {
-            let values: Vec<(i32, i32)> = widths[..count].iter().map(|&(_, v)| (0, v)).collect();
-            taskbar_widget_width(&values, 0, column_gap, pad)
-        };
-        width <= room
+    let best_in = |room: i32| {
+        layouts
+            .iter()
+            .position(|&l| taskbar_layout_width(l, widths, per_column, gaps) <= room)
+            .unwrap_or(layouts.len())
     };
-    let best_in = |room: i32| (0..hidden).find(|&l| fits(l, room)).unwrap_or(hidden);
     best_in(room).max(best_in(room - regrow_margin).min(shown))
 }
 
-/// Rows in pairs, as columns of "label value", with no panel behind them, so the
-/// widget looks like part of the taskbar. If that won't fit in `room` it gives up
-/// labels and then columns, rather than cover the taskbar's icons.
+/// Draws a row's readings into the slots of `grid`, starting from `x`.
+unsafe fn draw_row_values(
+    canvas: &mut Canvas,
+    values: &[RowValue],
+    grid: &ValueGrid,
+    (x, y): (i32, i32),
+    text_px: i32,
+    color_of: impl Fn(Rgba) -> Rgba,
+) {
+    for (slot, value) in values.iter().enumerate() {
+        let style = TextStyle {
+            px: text_px,
+            color: color_of(value.color),
+        };
+        let text_w = text_width(&value.text, text_px);
+        let reading_w = text_w.max(text_width(&value.widest, text_px));
+        draw_text(canvas, &value.text, x + grid.right_edge(slot, reading_w) - text_w, y, &style);
+    }
+}
+
+/// Rows in pairs, as columns of "label values", with no panel behind them, so the widget
+/// looks like part of the taskbar. What won't fit in `room` is left off, rather than cover
+/// the taskbar's icons; see `taskbar_layouts`.
 unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, room: i32, light: bool) -> Canvas {
     let px = |v: f32| (v * scale).round() as i32;
     let text_px = px(TASKBAR_TEXT_PX);
     let per_column = taskbar_rows_per_column(height, px(TASKBAR_ROW_H));
-    let columns: Vec<&[Row]> = rows.chunks(per_column).collect();
-    let widths = taskbar_column_widths(&columns, text_px);
-    let gaps = (px(TASKBAR_LABEL_GAP), px(TASKBAR_COLUMN_GAP), px(TASKBAR_PAD_X));
+    let widths = measure_rows(rows, text_px);
+    let gaps = TaskbarGaps {
+        label: px(TASKBAR_LABEL_GAP),
+        value: px(TASKBAR_VALUE_GAP),
+        column: px(TASKBAR_COLUMN_GAP),
+        pad: px(TASKBAR_PAD_X),
+    };
+    let first_row_values = rows.first().map_or(0, |row| row.values.len());
+    let layouts = taskbar_layouts(rows.len(), first_row_values);
     let before = UI.with(|ui| ui.shown_level.get());
-    let level = taskbar_level(&widths, gaps, room, px(TASKBAR_REGROW_MARGIN), before);
-    let (labels, count) = taskbar_level_parts(level, columns.len());
-    let hidden: usize = columns[count..].iter().map(|c| c.len()).sum();
+    let margin = px(TASKBAR_REGROW_MARGIN);
+    let level = taskbar_level(&layouts, &widths, per_column, gaps, room, margin, before);
+    let hide_all = TaskbarLayout {
+        labels: false,
+        rows: 0,
+        first_row_values: 0,
+    };
+    let layout = layouts.get(level).copied().unwrap_or(hide_all);
+    let shown: Vec<Row> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| {
+            Some(Row {
+                label: row.label.clone(),
+                values: row.values[..layout.values_kept(i, row.values.len())?].to_vec(),
+            })
+        })
+        .collect();
+    let total = |rows: &[Row]| rows.iter().map(|row| row.values.len()).sum::<usize>();
+    let hidden = total(rows) - total(&shown);
     if level != before {
-        log::info!(
-            "taskbar widget in {room} px: {count} of {} columns, labels: {labels}",
-            columns.len()
-        );
+        log::info!("taskbar widget in {room} px: {layout:?}, {hidden} readings hidden");
     }
     UI.with(|ui| {
         ui.shown_level.set(level);
-        ui.fits_taskbar.set(count > 0);
+        ui.fits_taskbar.set(!shown.is_empty());
         ui.hidden_rows.set(hidden);
     });
-    let label_gap = if labels { gaps.0 } else { 0 };
-    let widths: Vec<(i32, i32)> = widths[..count]
-        .iter()
-        .map(|&(l, v)| (if labels { l } else { 0 }, v))
-        .collect();
-    let columns = &columns[..count];
-    let width = taskbar_widget_width(&widths, label_gap, gaps.1, gaps.2);
 
+    let columns = taskbar_columns(layout, &widths, per_column, gaps);
+    let width = taskbar_layout_width(layout, &widths, per_column, gaps);
+    let label_gap = if layout.labels { gaps.label } else { 0 };
     let mut canvas = Canvas::new(width, height.max(1));
     for y in 0..canvas.h {
         for x in 0..canvas.w {
@@ -1909,64 +2130,55 @@ unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, room: i32
         }
     }
     let label_color = if light { TASKBAR_LIGHT_DIM } else { TEXT_DIM };
+    let color_of = |color: Rgba| {
+        if light && color == TEXT_MAIN {
+            TASKBAR_LIGHT_TEXT
+        } else {
+            color
+        }
+    };
     let row_h = px(TASKBAR_ROW_H);
-    let mut x = px(TASKBAR_PAD_X);
-    for (column, (label_w, value_w)) in columns.iter().zip(&widths) {
+    let mut x = gaps.pad;
+    for (column, (label_w, grid)) in shown.chunks(per_column.max(1)).zip(&columns) {
         let top = (canvas.h - row_h * column.len() as i32) / 2;
-        let right = x + label_w + label_gap + value_w;
+        let values_x = x + label_w + label_gap;
         for (i, row) in column.iter().enumerate() {
             let y = top + row_h * i as i32;
-            let value_color = if light && row.color == TEXT_MAIN {
-                TASKBAR_LIGHT_TEXT
-            } else {
-                row.color
-            };
-            let label = TextStyle {
-                px: text_px,
-                bold: false,
-                color: label_color,
-            };
-            let value = TextStyle {
-                px: text_px,
-                bold: true,
-                color: value_color,
-            };
-            if labels {
-                draw_text(&mut canvas, &row.label, x, y, Align::Left, &label);
+            if layout.labels {
+                let label = TextStyle {
+                    px: text_px,
+                    color: label_color,
+                };
+                draw_text(&mut canvas, &row.label, x, y, &label);
             }
-            draw_text(&mut canvas, &row.value, right, y, Align::Right, &value);
+            draw_row_values(&mut canvas, &row.values, grid, (values_x, y), text_px, color_of);
         }
-        x = right + px(TASKBAR_COLUMN_GAP);
+        x = values_x + grid.width + gaps.column;
     }
     canvas
 }
 
-fn taskbar_widget_width(columns: &[(i32, i32)], label_gap: i32, column_gap: i32, pad: i32) -> i32 {
-    let content: i32 = columns.iter().map(|(l, v)| l + label_gap + v).sum();
-    let gaps = column_gap * (columns.len() as i32 - 1).max(0);
-    content + gaps + pad * 2
-}
-
 unsafe fn render_widget(rows: &[Row], scale: f32) -> Canvas {
     let px = |v: f32| (v * scale).round() as i32;
-    let mut canvas = Canvas::new(px(WIDGET_W), widget_height(rows.len(), scale));
+    let text_px = px(WIDGET_TEXT_PX);
+    let gap = px(TASKBAR_VALUE_GAP);
+    let measured = measure_rows(rows, text_px);
+    let grid = ValueGrid::new(measured.iter().map(|row| row.values.as_slice()), gap);
+    let label_w = measured.iter().map(|row| row.label).max().unwrap_or(0);
+    let values_x = px(WIDGET_PAD_X) + label_w + px(WIDGET_LABEL_GAP);
+    // Wider than usual if a device has a lot of readings on its line.
+    let width = px(WIDGET_W).max(values_x + grid.width + px(WIDGET_PAD_X));
+    let mut canvas = Canvas::new(width, widget_height(rows.len(), scale));
     canvas.fill_panel(WIDGET_RADIUS * scale, PANEL, PANEL_EDGE, scale.max(1.0));
 
-    let right = canvas.w - px(WIDGET_PAD_X);
     for (i, row) in rows.iter().enumerate() {
         let y = px(WIDGET_PAD_Y + WIDGET_ROW_H * i as f32) + px(1.0);
         let label = TextStyle {
-            px: px(WIDGET_TEXT_PX),
-            bold: false,
+            px: text_px,
             color: TEXT_DIM,
         };
-        let value = TextStyle {
-            px: px(WIDGET_TEXT_PX),
-            bold: true,
-            color: row.color,
-        };
-        draw_text(&mut canvas, &row.label, px(WIDGET_PAD_X), y, Align::Left, &label);
-        draw_text(&mut canvas, &row.value, right, y, Align::Right, &value);
+        draw_text(&mut canvas, &row.label, px(WIDGET_PAD_X), y, &label);
+        draw_row_values(&mut canvas, &row.values, &grid, (values_x, y), text_px, |color| color);
     }
     canvas
 }
@@ -2262,50 +2474,95 @@ mod tests {
         assert_eq!(parse_settings("1 2 true cpu_temp floating").mode, WidgetMode::Floating);
     }
 
-    #[test]
-    fn taskbar_width_adds_columns_gaps_and_padding() {
-        assert_eq!(taskbar_widget_width(&[(50, 30)], 6, 14, 6), 50 + 6 + 30 + 12);
-        assert_eq!(
-            taskbar_widget_width(&[(50, 30), (40, 20)], 6, 14, 6),
-            (50 + 6 + 30) + 14 + (40 + 6 + 20) + 12
-        );
-        assert_eq!(taskbar_widget_width(&[], 6, 14, 6), 12);
+    fn gaps() -> TaskbarGaps {
+        TaskbarGaps {
+            label: 6,
+            value: 8,
+            column: 14,
+            pad: 6,
+        }
+    }
+
+    fn row_widths(label: i32, values: &[i32]) -> RowWidths {
+        RowWidths {
+            label,
+            values: values.to_vec(),
+        }
     }
 
     #[test]
-    fn labels_go_first_then_columns_from_the_end_then_the_widget() {
-        let widths = [(50, 30), (40, 20), (40, 20)];
-        let gaps = (6, 14, 6);
-        let fit = |room| taskbar_level(&widths, gaps, room, 0, 0);
-        let parts = |room| taskbar_level_parts(fit(room), widths.len());
-        assert_eq!(parts(1000), (true, 3));
-        assert_eq!(parts(258), (true, 3), "exactly fits with labels");
-        assert_eq!(parts(257), (false, 3));
-        assert_eq!(parts(110), (false, 3));
-        assert_eq!(parts(109), (false, 2));
-        assert_eq!(parts(76), (false, 2));
-        assert_eq!(parts(75), (false, 1));
-        assert_eq!(parts(42), (false, 1));
-        assert_eq!(parts(41), (false, 0), "nothing fits, and it must not cover the icons");
-        assert_eq!(parts(0), (false, 0));
+    fn labels_go_first_then_rows_then_readings_then_the_widget() {
+        // CPU with three readings, then Memory with one, stacked in one column.
+        let widths = [row_widths(30, &[30, 20, 20]), row_widths(40, &[60])];
+        let layouts = taskbar_layouts(2, 3);
+        let fit = |room| {
+            let level = taskbar_level(&layouts, &widths, 2, gaps(), room, 0, 0);
+            layouts.get(level).map(|l| (l.labels, l.rows, l.first_row_values))
+        };
+        assert_eq!(fit(1000), Some((true, 2, 3)));
+        assert_eq!(fit(144), Some((true, 2, 3)), "exactly fits: 40 + 6 + 86 + 12");
+        assert_eq!(fit(143), Some((false, 2, 3)));
+        assert_eq!(fit(98), Some((false, 2, 3)));
+        assert_eq!(fit(97), Some((false, 1, 2)), "dropping Memory alone doesn't narrow it");
+        assert_eq!(fit(70), Some((false, 1, 2)));
+        assert_eq!(fit(69), Some((false, 1, 1)));
+        assert_eq!(fit(42), Some((false, 1, 1)));
+        assert_eq!(fit(41), None, "nothing fits, and it must not cover the icons");
+    }
+
+    #[test]
+    fn the_same_reading_lines_up_across_rows() {
+        let cpu: &[i32] = &[40, 25, 30];
+        let gpu: &[i32] = &[35, 28];
+        let memory: &[i32] = &[90];
+        let grid = ValueGrid::new([cpu, gpu, memory].into_iter(), 10);
+        assert_eq!(grid.slots, [40, 28, 30], "the widest of each, ignoring the lone reading");
+        let edges = (grid.right_edge(0, 35), grid.right_edge(1, 25), grid.right_edge(2, 30));
+        assert_eq!(edges, (40, 78, 118), "each ends with its slot, whatever its own width");
+        assert_eq!(grid.right_edge(0, 90), grid.width, "too wide for a slot: ends with the grid");
+        assert_eq!(grid.width, 40 + 10 + 28 + 10 + 30);
+
+        let lone = ValueGrid::new([cpu, memory].into_iter(), 10);
+        assert_eq!(lone.slots, [40, 25, 30], "a long lone reading doesn't push the others apart");
+        assert_eq!(lone.width, 115);
+        let wide = ValueGrid::new([&[20, 20][..], &[90][..]].into_iter(), 10);
+        assert_eq!(wide.width, 90, "but it does make room for itself");
+        let singles: &[&[i32]] = &[&[40], &[90]];
+        let no_slots = ValueGrid::new(singles.iter().copied(), 10);
+        assert_eq!(no_slots.right_edge(0, 40), 90, "lone readings all end together");
+    }
+
+    #[test]
+    fn rows_stack_in_columns_and_a_short_taskbar_gets_more_columns() {
+        let widths = [row_widths(30, &[50]), row_widths(30, &[40]), row_widths(30, &[60])];
+        let layout = taskbar_layouts(3, 1)[0];
+        let columns = taskbar_columns(layout, &widths, 2, gaps());
+        let sizes: Vec<(i32, i32)> = columns.iter().map(|(label, grid)| (*label, grid.width)).collect();
+        assert_eq!(sizes, [(30, 50), (30, 60)]);
+        assert_eq!(taskbar_columns(layout, &widths, 1, gaps()).len(), 3);
+        assert_eq!(
+            taskbar_layout_width(layout, &widths, 2, gaps()),
+            (30 + 6 + 50) + 14 + (30 + 6 + 60) + 12
+        );
     }
 
     #[test]
     fn a_fuller_layout_returns_only_with_room_to_spare() {
-        let widths = [(50, 30), (40, 20)]; // 178 with labels, 76 without
-        let gaps = (6, 14, 6);
-        let fit = |room, shown| taskbar_level(&widths, gaps, room, 16, shown);
-        assert_eq!(fit(178, 1), 1, "barely fits, so labels stay off");
-        assert_eq!(fit(194, 1), 0);
-        assert_eq!(fit(178, 0), 0, "already showing, so stays while it fits");
-        assert_eq!(fit(177, 0), 1);
+        let widths = [row_widths(30, &[30, 20]), row_widths(40, &[60])];
+        let layouts = taskbar_layouts(2, 2);
+        // 118 with labels, 72 without.
+        let fit = |room, shown| taskbar_level(&layouts, &widths, 2, gaps(), room, 16, shown);
+        assert_eq!(fit(118, 1), 1, "barely fits, so labels stay off");
+        assert_eq!(fit(134, 1), 0);
+        assert_eq!(fit(118, 0), 0, "already showing, so stays while it fits");
+        assert_eq!(fit(117, 0), 1);
     }
 
     /// What the default readings do on a laptop, using real text measurements and the
     /// taskbar sizes measured on Windows 11 at 100%: 45 px for Start, 44 for Task View
-    /// and each app, 220 or 44 for search, 251 for the tray. Returns the free space,
-    /// whether labels show, and how many of the 2 columns show.
-    fn laptop_layout(screen_w: i32, scale: f32, search_w: f32, apps: u32) -> (i32, bool, usize) {
+    /// and each app, 220 or 44 for search, 251 for the tray. Returns the free space, whether
+    /// labels show, how many rows show, and how many readings the first row keeps.
+    fn laptop_layout(screen_w: i32, scale: f32, search_w: f32, apps: u32) -> (i32, bool, usize, usize) {
         let px = |v: f32| (v * scale).round() as i32;
         let bar = rect(0, 0, screen_w, px(48.0));
         let tray_left = screen_w - px(251.0);
@@ -2314,24 +2571,29 @@ mod tests {
         let mut readings = sample_readings(TempState::Live(48));
         readings.cpu_power = Some(15.0);
         let rows = widget_rows(&default_items(), &readings);
-        let columns: Vec<&[Row]> = rows.chunks(TASKBAR_ROWS_PER_COLUMN).collect();
-        let widths = unsafe { taskbar_column_widths(&columns, px(TASKBAR_TEXT_PX)) };
-        let gaps = (px(TASKBAR_LABEL_GAP), px(TASKBAR_COLUMN_GAP), px(TASKBAR_PAD_X));
-        let level = taskbar_level(&widths, gaps, room, 0, 0);
-        let (labels, count) = taskbar_level_parts(level, columns.len());
-        (room, labels, count)
+        let widths = unsafe { measure_rows(&rows, px(TASKBAR_TEXT_PX)) };
+        let gaps = TaskbarGaps {
+            label: px(TASKBAR_LABEL_GAP),
+            value: px(TASKBAR_VALUE_GAP),
+            column: px(TASKBAR_COLUMN_GAP),
+            pad: px(TASKBAR_PAD_X),
+        };
+        let layouts = taskbar_layouts(rows.len(), rows[0].values.len());
+        let level = taskbar_level(&layouts, &widths, TASKBAR_ROWS_PER_COLUMN, gaps, room, 0, 0);
+        let layout = layouts[level];
+        (room, layout.labels, layout.rows, layout.first_row_values)
     }
 
     #[test]
     fn fourteen_inch_laptop_with_eight_apps() {
         let at = |w, scale, search| laptop_layout(w, scale, search, 8);
         let (box_w, icon_w) = (220.0, 44.0);
-        assert_eq!(at(1920, 1.5, box_w), (83, false, 1), "1080p at 150%, search box");
-        assert_eq!(at(1920, 1.5, icon_w), (215, false, 2), "1080p at 150%, search icon");
-        assert_eq!(at(1920, 1.25, box_w), (229, false, 2), "1080p at 125%, search box");
-        assert_eq!(at(1920, 1.25, icon_w), (339, true, 2), "1080p at 125%, search icon");
-        assert_eq!(at(1366, 1.0, box_w), (98, false, 1), "1366x768, search box");
-        assert_eq!(at(1366, 1.0, icon_w), (186, false, 2), "1366x768, search icon");
+        assert_eq!(at(1920, 1.5, box_w), (83, false, 1, 1), "1080p at 150%, search box");
+        assert_eq!(at(1920, 1.5, icon_w), (215, false, 1, 2), "1080p at 150%, search icon");
+        assert_eq!(at(1920, 1.25, box_w), (229, false, 2, 3), "1080p at 125%, search box");
+        assert_eq!(at(1920, 1.25, icon_w), (339, true, 2, 3), "1080p at 125%, search icon");
+        assert_eq!(at(1366, 1.0, box_w), (98, false, 1, 2), "1366x768, search box");
+        assert_eq!(at(1366, 1.0, icon_w), (186, false, 2, 3), "1366x768, search icon");
     }
 
     fn monitor(name: &str, left: i32, primary: bool) -> MonitorEntry {
@@ -2476,7 +2738,10 @@ mod tests {
     fn values(items: &[WidgetItem], readings: &Readings) -> Vec<(String, String)> {
         widget_rows(items, readings)
             .into_iter()
-            .map(|r| (r.label, r.value))
+            .map(|r| {
+                let texts: Vec<String> = r.values.into_iter().map(|value| value.text).collect();
+                (r.label, texts.join(" + "))
+            })
             .collect()
     }
 
@@ -2497,10 +2762,8 @@ mod tests {
         assert_eq!(
             values(&items, &sample_readings(TempState::Live(48))),
             vec![
-                pair("CPU temp", "48 °C"),
-                pair("CPU load", "12%"),
-                pair("CPU freq", "4.50 GHz"),
-                pair("GPU temp", "37 °C"),
+                pair("CPU", "48 °C + 12% + 4.50 GHz"),
+                pair("GPU", "37 °C"),
                 pair("GPU VRAM", "2.0 / 16 GB"),
                 pair("Memory", "14.8 / 30 GB"),
             ]
@@ -2513,11 +2776,46 @@ mod tests {
         assert_eq!(
             values(&items, &sample_readings(TempState::Off)),
             vec![
-                pair("CPU temp", "Click to enable"),
-                pair("CPU load", "12%"),
-                pair("CPU power", NO_VALUE),
+                pair("CPU", "Click to enable + 12%"),
             ]
         );
+    }
+
+    #[test]
+    fn the_widget_keeps_its_width_as_numbers_gain_digits() {
+        let items = [
+            WidgetItem::CpuTemp,
+            WidgetItem::CpuLoad,
+            WidgetItem::CpuFreq,
+            WidgetItem::CpuPower,
+            WidgetItem::Gpu(0, GpuMetric::Clock),
+            WidgetItem::Gpu(0, GpuMetric::Vram),
+            WidgetItem::Memory,
+        ];
+        let mut low = sample_readings(TempState::Live(9));
+        let mut high = sample_readings(TempState::Live(100));
+        (low.cpu_load, high.cpu_load) = (Some(1.0), Some(100.0));
+        (low.cpu_power, high.cpu_power) = (Some(6.0), Some(120.0));
+        (low.mem_used_gb, high.mem_used_gb) = (1.2, 29.7);
+        low.gpus[0].clock = Some(300.0);
+        high.gpus[0].clock = Some(2850.0);
+        low.gpus[0].mem_used_mb = Some(20.0);
+        high.gpus[0].mem_used_mb = Some(16000.0);
+        let widths = |r: &Readings| -> Vec<Vec<i32>> {
+            unsafe { measure_rows(&widget_rows(&items, r), 13) }
+                .into_iter()
+                .map(|row| row.values)
+                .collect()
+        };
+        assert_eq!(widths(&low), widths(&high));
+    }
+
+    #[test]
+    fn a_device_with_nothing_to_show_gets_one_dash() {
+        let mut readings = sample_readings(TempState::Unavailable);
+        readings.cpu_load = None;
+        let items = [WidgetItem::CpuTemp, WidgetItem::CpuLoad, WidgetItem::CpuPower];
+        assert_eq!(values(&items, &readings), vec![pair("CPU", NO_VALUE)]);
     }
 
     #[test]
@@ -2528,9 +2826,35 @@ mod tests {
     }
 
     #[test]
-    fn gpu_rows_are_numbered_only_with_several_gpus() {
-        let item = WidgetItem::Gpu(1, GpuMetric::Load);
-        assert_eq!(item.row_label(2), "GPU 2 load");
-        assert_eq!(WidgetItem::Gpu(0, GpuMetric::Load).row_label(1), "GPU load");
+    fn menu_items_are_grouped_under_their_device() {
+        let titles = ["Radeon 780M".to_string(), "RTX 4070".to_string()];
+        let groups: Vec<(Option<String>, &str)> = all_items(2)
+            .into_iter()
+            .map(|item| (item.menu_heading(&titles), item.menu_label()))
+            .filter(|(_, label)| *label == "Temperature" || *label == "Memory used")
+            .collect();
+        assert_eq!(
+            groups,
+            vec![
+                (Some("CPU".to_string()), "Temperature"),
+                (Some("Radeon 780M".to_string()), "Temperature"),
+                (Some("RTX 4070".to_string()), "Temperature"),
+                (None, "Memory used"),
+            ]
+        );
+        assert_eq!(WidgetItem::CpuFreq.menu_label(), "Frequency");
+        assert_eq!(WidgetItem::Gpu(0, GpuMetric::Clock).menu_label(), "Frequency");
+    }
+
+    #[test]
+    fn gpu_rows_use_the_gpu_titles() {
+        let titles = ["Radeon 780M".to_string(), "RTX 4070".to_string()];
+        assert_eq!(WidgetItem::Gpu(1, GpuMetric::Load).row_label(&titles), "RTX 4070");
+        assert_eq!(WidgetItem::Gpu(1, GpuMetric::Vram).row_label(&titles), "RTX 4070 VRAM");
+        assert_eq!(
+            WidgetItem::Gpu(0, GpuMetric::Temp).menu_heading(&titles).as_deref(),
+            Some("Radeon 780M")
+        );
+        assert_eq!(WidgetItem::Gpu(5, GpuMetric::Load).row_label(&titles), "GPU");
     }
 }
