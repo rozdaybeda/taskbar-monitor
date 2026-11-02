@@ -20,18 +20,23 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use eframe::egui;
-use windows::core::{w, HSTRING, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR, VARIANT};
 use windows::Win32::Foundation::{
     BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationCondition, TreeScope_Descendants,
+    UIA_ButtonControlTypeId, UIA_ControlTypePropertyId,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::UI::Shell::{
@@ -62,6 +67,7 @@ const MENU_UPDATE: usize = 5;
 const MENU_AUTO_START: usize = 6;
 const MENU_CHECK_UPDATES: usize = 7;
 const MENU_MODE_BASE: usize = 50;
+const MENU_MONITOR_BASE: usize = 60;
 const MENU_ITEM_BASE: usize = 100;
 
 // Widget layout at 100% display scale.
@@ -92,6 +98,15 @@ const TASKBAR_HIT_AREA: Rgba = Rgba(0, 0, 0, 1);
 const TASKBAR_LIGHT_TEXT: Rgba = Rgba(26, 26, 28, 255);
 const TASKBAR_LIGHT_DIM: Rgba = Rgba(84, 86, 92, 255);
 const SCREEN_EDGE_TOLERANCE: i32 = 4;
+// How often to look for where the taskbar's icons end.
+const ICON_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+// A hidden column comes back only with this much room to spare (at 100% scale), so
+// one that barely fits doesn't flicker as its numbers change width.
+const TASKBAR_REGROW_MARGIN: f32 = 16.0;
+const ICONS_UNKNOWN: i32 = -1;
+// Secondary taskbars have no TrayNotifyWnd to measure, just a clock at the right, so
+// this much is kept clear for it (at 100% scale).
+const SECONDARY_TRAY_W: i32 = 120;
 
 /// What the tray thread needs from the rest of the app.
 pub struct TrayContext {
@@ -105,6 +120,11 @@ pub struct TrayContext {
 static CONTEXT: OnceLock<TrayContext> = OnceLock::new();
 static TRAY_READY: AtomicBool = AtomicBool::new(false);
 static MAIN_HIDDEN: AtomicBool = AtomicBool::new(false);
+static ICONS_RIGHT: AtomicI32 = AtomicI32::new(ICONS_UNKNOWN);
+static ICONS_NEEDED: AtomicBool = AtomicBool::new(false);
+/// Device name of the monitor picked for the widget; `None` means the primary one.
+/// Kept when that monitor is unplugged, so the widget returns when it's back.
+static WANTED_MONITOR: Mutex<Option<String>> = Mutex::new(None);
 
 /// True once the tray icon exists, meaning closing the main window can safely
 /// hide it instead of exiting: there's a way to bring it back.
@@ -797,6 +817,14 @@ struct UiState {
     items: RefCell<Vec<WidgetItem>>,
     shown_tip: RefCell<Option<String>>,
     shown_widget: RefCell<Option<WidgetKey>>,
+    /// The layout on the taskbar last time; see `taskbar_level`.
+    shown_level: Cell<usize>,
+    /// False when the taskbar has no room for even one column.
+    fits_taskbar: Cell<bool>,
+    /// The taskbar the widget was created for.
+    attached_bar: Cell<Option<HWND>>,
+    /// Readings the taskbar has no room for.
+    hidden_rows: Cell<usize>,
 }
 
 /// Everything that decides how the widget looks, to skip redrawing when it's unchanged.
@@ -807,6 +835,7 @@ struct WidgetKey {
     mode: WidgetMode,
     light_taskbar: bool,
     height: i32,
+    room: i32,
 }
 
 thread_local! {
@@ -821,6 +850,10 @@ thread_local! {
         items: RefCell::new(default_items()),
         shown_tip: RefCell::new(None),
         shown_widget: RefCell::new(None),
+        shown_level: Cell::new(0),
+        fits_taskbar: Cell::new(true),
+        attached_bar: Cell::new(None),
+        hidden_rows: Cell::new(0),
     };
 }
 
@@ -888,6 +921,7 @@ unsafe fn run() {
         ui.floating_position.set(settings.position);
         *ui.items.borrow_mut() = settings.items.clone();
     });
+    *WANTED_MONITOR.lock().unwrap() = settings.monitor.clone();
 
     if add_tray_icon(tray_hwnd) {
         TRAY_READY.store(true, Ordering::SeqCst);
@@ -902,6 +936,7 @@ unsafe fn run() {
     );
     create_widget(instance);
     refresh();
+    std::thread::spawn(|| unsafe { watch_taskbar_icons() });
     crate::update::start(notify_update_found);
     SetTimer(tray_hwnd, TIMER_REFRESH, REFRESH_MS, None);
 
@@ -1121,6 +1156,9 @@ unsafe fn recreate_widget() {
         let _ = DestroyWindow(ui.widget_hwnd.get());
         ui.widget_hwnd.set(HWND::default());
         *ui.shown_widget.borrow_mut() = None;
+        ui.shown_level.set(0);
+        ui.fits_taskbar.set(true);
+        ui.hidden_rows.set(0);
     });
     if let Ok(module) = GetModuleHandleW(None) {
         create_widget(module.into());
@@ -1137,6 +1175,38 @@ unsafe fn modes_menu() -> Option<HMENU> {
         let _ = AppendMenuW(menu, MF_STRING | check, MENU_MODE_BASE + index, mode.menu_label());
     }
     Some(menu)
+}
+
+/// The list of monitors to put the widget on. In a taskbar position, a monitor without
+/// a taskbar can't be picked.
+unsafe fn monitors_menu(monitors: &[MonitorEntry]) -> Option<HMENU> {
+    let menu = CreatePopupMenu().ok()?;
+    let wanted = WANTED_MONITOR.lock().unwrap().clone();
+    let current = choose_monitor(monitors, wanted.as_deref()).map(|m| m.name.clone());
+    let on_taskbar = UI.with(|ui| ui.widget_mode.get()).on_taskbar();
+    for (index, monitor) in monitors.iter().enumerate() {
+        let has_taskbar = monitor.primary || secondary_taskbar_on(&monitor.name).is_some();
+        let mut flags = MF_STRING;
+        if current.as_deref() == Some(monitor.name.as_str()) {
+            flags |= MF_CHECKED;
+        }
+        if on_taskbar && !has_taskbar {
+            flags |= MF_GRAYED;
+        }
+        let label = HSTRING::from(monitor_label(index, monitor, has_taskbar));
+        let _ = AppendMenuW(menu, flags, MENU_MONITOR_BASE + index, &label);
+    }
+    Some(menu)
+}
+
+unsafe fn set_widget_monitor(monitor: &MonitorEntry) {
+    log::info!("widget monitor set to {} from the menu", monitor.name);
+    *WANTED_MONITOR.lock().unwrap() = Some(monitor.name.clone());
+    // Both belong to the old monitor: the saved spot, and where its icons ended.
+    UI.with(|ui| ui.floating_position.set(None));
+    ICONS_RIGHT.store(ICONS_UNKNOWN, Ordering::Relaxed);
+    recreate_widget();
+    save_settings();
 }
 
 /// The checklist of readings the widget can show.
@@ -1186,11 +1256,22 @@ unsafe fn show_menu() {
     }
     let check = if visible { MF_CHECKED } else { MF_UNCHECKED };
     let _ = AppendMenuW(menu, MF_STRING | check, MENU_WIDGET, w!("Show &widget"));
+    let hidden = UI.with(|ui| ui.hidden_rows.get());
+    if visible && hidden > 0 {
+        let label = HSTRING::from(format!("Taskbar is full: {hidden} hidden"));
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &label);
+    }
     if let Some(items) = items_menu(&catalog, gpu_count) {
         let _ = AppendMenuW(menu, MF_POPUP, items.0 as usize, w!("Widget &items"));
     }
     if let Some(modes) = modes_menu() {
         let _ = AppendMenuW(menu, MF_POPUP, modes.0 as usize, w!("Widget &position"));
+    }
+    let monitors = sorted_monitors(list_monitors());
+    if monitors.len() > 1 {
+        if let Some(submenu) = monitors_menu(&monitors) {
+            let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, w!("Widget &monitor"));
+        }
     }
     if state == TempState::Off {
         let _ = AppendMenuW(menu, MF_STRING, MENU_ENABLE, w!("&Enable CPU temperature"));
@@ -1235,6 +1316,11 @@ unsafe fn show_menu() {
         MENU_QUIT => quit(),
         id if (MENU_MODE_BASE..MENU_MODE_BASE + WIDGET_MODES.len()).contains(&id) => {
             set_widget_mode(WIDGET_MODES[id - MENU_MODE_BASE]);
+        }
+        id if (MENU_MONITOR_BASE..MENU_ITEM_BASE).contains(&id) => {
+            if let Some(monitor) = monitors.get(id - MENU_MONITOR_BASE) {
+                set_widget_monitor(monitor);
+            }
         }
         id if id >= MENU_ITEM_BASE => {
             if let Some(&item) = catalog.get(id - MENU_ITEM_BASE) {
@@ -1296,30 +1382,180 @@ fn widget_height(rows: usize, scale: f32) -> i32 {
 }
 
 unsafe fn default_widget_position(scale: f32) -> (i32, i32) {
-    let mut work = RECT::default();
-    let _ = SystemParametersInfoW(
-        SPI_GETWORKAREA,
-        0,
-        Some(&mut work as *mut RECT as *mut c_void),
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-    );
+    let monitors = list_monitors();
+    let wanted = WANTED_MONITOR.lock().unwrap().clone();
+    let work = choose_monitor(&monitors, wanted.as_deref()).map_or(RECT::default(), |m| m.work);
     let width = (WIDGET_W * scale) as i32;
     (work.right - width - WIDGET_MARGIN, work.top + WIDGET_MARGIN)
 }
 
-/// The taskbar's window, its screen rectangle, and where the tray area starts.
-/// `None` if it can't be found, or isn't a horizontal bar along the screen.
+/// One connected monitor, in screen coordinates.
+#[derive(Clone, Debug, PartialEq)]
+struct MonitorEntry {
+    name: String,
+    rect: RECT,
+    work: RECT,
+    primary: bool,
+}
+
+unsafe fn monitor_entry(monitor: HMONITOR) -> Option<MonitorEntry> {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    if !GetMonitorInfoW(monitor, &mut info.monitorInfo).as_bool() {
+        return None;
+    }
+    let end = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
+    Some(MonitorEntry {
+        name: String::from_utf16_lossy(&info.szDevice[..end]),
+        rect: info.monitorInfo.rcMonitor,
+        work: info.monitorInfo.rcWork,
+        primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+    })
+}
+
+unsafe extern "system" fn collect_monitor(
+    monitor: HMONITOR,
+    _: HDC,
+    _: *mut RECT,
+    list: LPARAM,
+) -> BOOL {
+    let list = &mut *(list.0 as *mut Vec<MonitorEntry>);
+    list.extend(monitor_entry(monitor));
+    BOOL(1)
+}
+
+unsafe fn list_monitors() -> Vec<MonitorEntry> {
+    let mut list = Vec::new();
+    let _ = EnumDisplayMonitors(
+        None,
+        None,
+        Some(collect_monitor),
+        LPARAM(&mut list as *mut Vec<MonitorEntry> as isize),
+    );
+    list
+}
+
+/// Menu order: the primary monitor, then the others from left to right.
+fn sorted_monitors(mut monitors: Vec<MonitorEntry>) -> Vec<MonitorEntry> {
+    monitors.sort_by_key(|m| (!m.primary, m.rect.left, m.rect.top));
+    monitors
+}
+
+/// The monitor called `wanted`, or the primary one if that isn't connected.
+fn choose_monitor<'a>(monitors: &'a [MonitorEntry], wanted: Option<&str>) -> Option<&'a MonitorEntry> {
+    monitors
+        .iter()
+        .find(|m| Some(m.name.as_str()) == wanted)
+        .or_else(|| monitors.iter().find(|m| m.primary))
+        .or_else(|| monitors.first())
+}
+
+fn monitor_label(index: usize, monitor: &MonitorEntry, has_taskbar: bool) -> String {
+    let (w, h) = (monitor.rect.right - monitor.rect.left, monitor.rect.bottom - monitor.rect.top);
+    let note = match (monitor.primary, has_taskbar) {
+        (true, _) => " (primary)",
+        (false, false) => " (no taskbar)",
+        (false, true) => "",
+    };
+    format!("Monitor {}{note}: {w} x {h}", index + 1)
+}
+
+/// The taskbar on the monitor called `name`, if it's a secondary one showing a taskbar.
+unsafe fn secondary_taskbar_on(name: &str) -> Option<HWND> {
+    let mut after = HWND::default();
+    while let Ok(taskbar) = FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), PCWSTR::null()) {
+        let monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST);
+        if monitor_entry(monitor).is_some_and(|m| m.name == name) {
+            return Some(taskbar);
+        }
+        after = taskbar;
+    }
+    None
+}
+
+/// The chosen taskbar's window, its screen rectangle, and where the tray area starts.
+/// That's the primary taskbar unless a monitor with its own taskbar was picked. `None`
+/// if it can't be found, or isn't a horizontal bar along the screen.
 unsafe fn find_taskbar() -> Option<(HWND, RECT, i32)> {
-    let taskbar = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok()?;
+    let wanted = WANTED_MONITOR.lock().unwrap().clone();
+    let taskbar = match wanted.and_then(|name| secondary_taskbar_on(&name)) {
+        Some(secondary) => secondary,
+        None => FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok()?,
+    };
     let mut rect = RECT::default();
     GetWindowRect(taskbar, &mut rect).ok()?;
     if rect.right - rect.left <= rect.bottom - rect.top {
         return None;
     }
-    let tray = FindWindowExW(taskbar, None, w!("TrayNotifyWnd"), PCWSTR::null()).ok()?;
     let mut tray_rect = RECT::default();
-    GetWindowRect(tray, &mut tray_rect).ok()?;
-    Some((taskbar, rect, tray_rect.left))
+    let tray_left = match FindWindowExW(taskbar, None, w!("TrayNotifyWnd"), PCWSTR::null()) {
+        Ok(tray) => {
+            GetWindowRect(tray, &mut tray_rect).ok()?;
+            tray_rect.left
+        }
+        Err(_) => rect.right - SECONDARY_TRAY_W * GetDpiForWindow(taskbar).max(96) as i32 / 96,
+    };
+    Some((taskbar, rect, tray_left))
+}
+
+/// Keeps `ICONS_RIGHT` up to date. On its own thread because asking Explorer can
+/// block for as long as Explorer is busy, and the widget shouldn't freeze with it.
+unsafe fn watch_taskbar_icons() {
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    let automation: windows::core::Result<IUIAutomation> =
+        CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+    let setup = automation.and_then(|automation| {
+        let value = VARIANT::from(UIA_ButtonControlTypeId.0);
+        let buttons = automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &value)?;
+        Ok((automation, buttons))
+    });
+    let (automation, buttons) = match setup {
+        Ok(setup) => setup,
+        Err(e) => {
+            log::warn!("can't see the taskbar's icons: {e}");
+            return;
+        }
+    };
+    loop {
+        if ICONS_NEEDED.load(Ordering::Relaxed) {
+            let right = taskbar_icons_right(&automation, &buttons).unwrap_or(ICONS_UNKNOWN);
+            ICONS_RIGHT.store(right, Ordering::Relaxed);
+        }
+        std::thread::sleep(ICON_POLL);
+    }
+}
+
+/// Where the last button left of the tray ends. UI Automation because Windows 11 draws
+/// the icons itself: the classic task list window's rectangle doesn't match them.
+unsafe fn taskbar_icons_right(
+    automation: &IUIAutomation,
+    buttons: &IUIAutomationCondition,
+) -> Option<i32> {
+    let (taskbar, _, tray_left) = find_taskbar()?;
+    let found = automation
+        .ElementFromHandle(taskbar)
+        .ok()?
+        .FindAll(TreeScope_Descendants, buttons)
+        .ok()?;
+    let mut right = None;
+    for i in 0..found.Length().ok()? {
+        let rect = found.GetElement(i).ok()?.CurrentBoundingRectangle().ok()?;
+        if rect.right > rect.left && rect.right <= tray_left {
+            right = right.max(Some(rect.right));
+        }
+    }
+    right
+}
+
+/// Pixels free between the taskbar's icons and the tray. If the icons can't be found,
+/// assumes the default layout at its fullest: centred icons reaching the middle.
+fn taskbar_room(bar: &RECT, tray_left: i32, icons_right: i32) -> i32 {
+    let icons_end = if icons_right == ICONS_UNKNOWN {
+        (bar.left + bar.right) / 2
+    } else {
+        icons_right
+    };
+    (tray_left - TASKBAR_TRAY_GAP - icons_end).max(0)
 }
 
 unsafe fn create_widget(instance: windows::Win32::Foundation::HINSTANCE) {
@@ -1399,6 +1635,7 @@ unsafe fn create_widget(instance: windows::Win32::Foundation::HINSTANCE) {
 
     UI.with(|ui| {
         ui.widget_hwnd.set(hwnd);
+        ui.attached_bar.set(find_taskbar().filter(|_| mode.on_taskbar()).map(|(bar, ..)| bar));
         if ui.widget_visible.get() {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
@@ -1416,15 +1653,15 @@ unsafe fn fullscreen_app_running() -> bool {
 }
 
 /// An auto-hiding taskbar slides off the bottom of the screen; the overlay should too.
-fn taskbar_on_screen(taskbar_top: i32, screen_height: i32) -> bool {
-    taskbar_top < screen_height - SCREEN_EDGE_TOLERANCE
+fn taskbar_on_screen(taskbar_top: i32, screen_bottom: i32) -> bool {
+    taskbar_top < screen_bottom - SCREEN_EDGE_TOLERANCE
 }
 
 /// Keeps a taskbar widget just left of the tray, and an overlay out of the way of
 /// full-screen apps. Runs on every refresh, because the tray changes width.
 unsafe fn place_on_taskbar(hwnd: HWND, mode: WidgetMode) {
-    let visible = UI.with(|ui| ui.widget_visible.get());
-    let Some((_, bar, tray_left)) = find_taskbar() else {
+    let visible = UI.with(|ui| ui.widget_visible.get() && ui.fits_taskbar.get());
+    let Some((taskbar, bar, tray_left)) = find_taskbar() else {
         return;
     };
     let mut rect = RECT::default();
@@ -1434,6 +1671,9 @@ unsafe fn place_on_taskbar(hwnd: HWND, mode: WidgetMode) {
     let y = bar.top + (bar.bottom - bar.top - h) / 2;
 
     if mode == WidgetMode::TaskbarEmbedded {
+        if visible != IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
         let _ = SetWindowPos(
             hwnd,
             HWND_TOP,
@@ -1447,11 +1687,13 @@ unsafe fn place_on_taskbar(hwnd: HWND, mode: WidgetMode) {
     }
 
     let fullscreen = fullscreen_app_running();
-    let bar_on_screen = taskbar_on_screen(bar.top, GetSystemMetrics(SM_CYSCREEN));
+    let screen_bottom = monitor_entry(MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST))
+        .map_or(GetSystemMetrics(SM_CYSCREEN), |m| m.rect.bottom);
+    let bar_on_screen = taskbar_on_screen(bar.top, screen_bottom);
     let show = visible && !fullscreen && bar_on_screen;
     if show != IsWindowVisible(hwnd).as_bool() {
         log::info!(
-            "overlay {}: widget on: {visible}, full-screen app: {fullscreen}, taskbar on screen: {bar_on_screen}",
+            "overlay {}: widget on and fits: {visible}, full-screen app: {fullscreen}, taskbar on screen: {bar_on_screen}",
             if show { "shown" } else { "hidden" }
         );
         let _ = ShowWindow(hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
@@ -1491,24 +1733,42 @@ unsafe fn paint_widget(readings: &Readings) {
     if hwnd.is_invalid() {
         return;
     }
+    ICONS_NEEDED.store(visible && mode.on_taskbar(), Ordering::Relaxed);
+    // A monitor was plugged in or out, taking its taskbar and any widget owned by it.
+    if mode.on_taskbar() {
+        let bar = find_taskbar().map(|(bar, ..)| bar);
+        if bar != UI.with(|ui| ui.attached_bar.get()) {
+            log::info!("the widget's taskbar changed, moving the widget");
+            recreate_widget();
+            return;
+        }
+    }
     if visible {
         let rows = UI.with(|ui| widget_rows(&ui.items.borrow(), readings));
+        let bar = find_taskbar();
         let key = WidgetKey {
             rows,
             dpi: GetDpiForWindow(hwnd),
             mode,
             light_taskbar: mode.on_taskbar() && taskbar_is_light(),
-            height: find_taskbar().map_or(0, |(_, bar, _)| bar.bottom - bar.top),
+            height: bar.map_or(0, |(_, bar, _)| bar.bottom - bar.top),
+            room: bar.map_or(i32::MAX, |(_, bar, tray_left)| {
+                taskbar_room(&bar, tray_left, ICONS_RIGHT.load(Ordering::Relaxed))
+            }),
         };
-        let unchanged = UI.with(|ui| ui.shown_widget.borrow().as_ref() == Some(&key));
-        if !unchanged {
+        let shown = UI.with(|ui| ui.shown_widget.borrow().as_ref().map(|k| (k == &key, k.rows.len())));
+        if shown.map(|(same, _)| same) != Some(true) {
             let scale = widget_scale(hwnd);
             let canvas = if mode.on_taskbar() {
-                render_taskbar_widget(&key.rows, scale, key.height, key.light_taskbar)
+                render_taskbar_widget(&key.rows, scale, key.height, key.room, key.light_taskbar)
             } else {
                 render_widget(&key.rows, scale)
             };
             present(hwnd, &canvas, mode);
+            // Only when it changes height, so this never fights a drag in progress.
+            if mode == WidgetMode::Floating && shown.map(|(_, rows)| rows) != Some(key.rows.len()) {
+                keep_on_screen(hwnd);
+            }
             UI.with(|ui| *ui.shown_widget.borrow_mut() = Some(key));
         }
     }
@@ -1517,13 +1777,47 @@ unsafe fn paint_widget(readings: &Readings) {
     }
 }
 
-/// Rows in pairs, as columns of "label value", with no panel behind them, so the
-/// widget looks like part of the taskbar.
-unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, light: bool) -> Canvas {
-    let px = |v: f32| (v * scale).round() as i32;
-    let text_px = px(TASKBAR_TEXT_PX);
-    let columns: Vec<&[Row]> = rows.chunks(TASKBAR_ROWS_PER_COLUMN).collect();
-    let widths: Vec<(i32, i32)> = columns
+/// Moves a floating widget back inside its monitor's work area, for when the
+/// resolution or scale shrank, or more rows made it taller.
+unsafe fn keep_on_screen(hwnd: HWND) {
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut rect = RECT::default();
+    if !GetMonitorInfoW(monitor, &mut info).as_bool() || GetWindowRect(hwnd, &mut rect).is_err() {
+        return;
+    }
+    let (x, y) = clamped_position(&rect, &info.rcWork);
+    if (x, y) != (rect.left, rect.top) {
+        log::info!("moving the widget back on screen, to {x}, {y}");
+        let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Where `window` should go to lie inside `work`. If it's too big to fit, its top left
+/// stays visible, since that's the end to grab it by.
+fn clamped_position(window: &RECT, work: &RECT) -> (i32, i32) {
+    let (w, h) = (window.right - window.left, window.bottom - window.top);
+    (
+        window.left.min(work.right - w).max(work.left),
+        window.top.min(work.bottom - h).max(work.top),
+    )
+}
+
+/// One row per column when the taskbar is too short to stack two.
+fn taskbar_rows_per_column(height: i32, row_h: i32) -> usize {
+    if height >= row_h * TASKBAR_ROWS_PER_COLUMN as i32 {
+        TASKBAR_ROWS_PER_COLUMN
+    } else {
+        1
+    }
+}
+
+/// The (label, value) width of each column, in pixels.
+unsafe fn taskbar_column_widths(columns: &[&[Row]], text_px: i32) -> Vec<(i32, i32)> {
+    columns
         .iter()
         .map(|column| {
             let label = column
@@ -1538,13 +1832,75 @@ unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, light: bo
                 .unwrap_or(0);
             (label, value)
         })
+        .collect()
+}
+
+/// What taskbar layout `level` means for `columns` columns: whether labels are drawn,
+/// and how many columns. Level 0 is everything. Next the labels go, since readings are
+/// mostly recognisable by their units, then columns from the end, then the widget.
+fn taskbar_level_parts(level: usize, columns: usize) -> (bool, usize) {
+    if level == 0 {
+        (true, columns)
+    } else {
+        (false, (columns + 1).saturating_sub(level))
+    }
+}
+
+/// The fullest layout that fits in `room` pixels, given the level `shown` last.
+fn taskbar_level(
+    widths: &[(i32, i32)],
+    (label_gap, column_gap, pad): (i32, i32, i32),
+    room: i32,
+    regrow_margin: i32,
+    shown: usize,
+) -> usize {
+    let hidden = widths.len() + 1;
+    let fits = |level: usize, room: i32| {
+        let (labels, count) = taskbar_level_parts(level, widths.len());
+        let width = if labels {
+            taskbar_widget_width(widths, label_gap, column_gap, pad)
+        } else {
+            let values: Vec<(i32, i32)> = widths[..count].iter().map(|&(_, v)| (0, v)).collect();
+            taskbar_widget_width(&values, 0, column_gap, pad)
+        };
+        width <= room
+    };
+    let best_in = |room: i32| (0..hidden).find(|&l| fits(l, room)).unwrap_or(hidden);
+    best_in(room).max(best_in(room - regrow_margin).min(shown))
+}
+
+/// Rows in pairs, as columns of "label value", with no panel behind them, so the
+/// widget looks like part of the taskbar. If that won't fit in `room` it gives up
+/// labels and then columns, rather than cover the taskbar's icons.
+unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, room: i32, light: bool) -> Canvas {
+    let px = |v: f32| (v * scale).round() as i32;
+    let text_px = px(TASKBAR_TEXT_PX);
+    let per_column = taskbar_rows_per_column(height, px(TASKBAR_ROW_H));
+    let columns: Vec<&[Row]> = rows.chunks(per_column).collect();
+    let widths = taskbar_column_widths(&columns, text_px);
+    let gaps = (px(TASKBAR_LABEL_GAP), px(TASKBAR_COLUMN_GAP), px(TASKBAR_PAD_X));
+    let before = UI.with(|ui| ui.shown_level.get());
+    let level = taskbar_level(&widths, gaps, room, px(TASKBAR_REGROW_MARGIN), before);
+    let (labels, count) = taskbar_level_parts(level, columns.len());
+    let hidden: usize = columns[count..].iter().map(|c| c.len()).sum();
+    if level != before {
+        log::info!(
+            "taskbar widget in {room} px: {count} of {} columns, labels: {labels}",
+            columns.len()
+        );
+    }
+    UI.with(|ui| {
+        ui.shown_level.set(level);
+        ui.fits_taskbar.set(count > 0);
+        ui.hidden_rows.set(hidden);
+    });
+    let label_gap = if labels { gaps.0 } else { 0 };
+    let widths: Vec<(i32, i32)> = widths[..count]
+        .iter()
+        .map(|&(l, v)| (if labels { l } else { 0 }, v))
         .collect();
-    let width = taskbar_widget_width(
-        &widths,
-        px(TASKBAR_LABEL_GAP),
-        px(TASKBAR_COLUMN_GAP),
-        px(TASKBAR_PAD_X),
-    );
+    let columns = &columns[..count];
+    let width = taskbar_widget_width(&widths, label_gap, gaps.1, gaps.2);
 
     let mut canvas = Canvas::new(width, height.max(1));
     for y in 0..canvas.h {
@@ -1557,7 +1913,7 @@ unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, light: bo
     let mut x = px(TASKBAR_PAD_X);
     for (column, (label_w, value_w)) in columns.iter().zip(&widths) {
         let top = (canvas.h - row_h * column.len() as i32) / 2;
-        let right = x + label_w + px(TASKBAR_LABEL_GAP) + value_w;
+        let right = x + label_w + label_gap + value_w;
         for (i, row) in column.iter().enumerate() {
             let y = top + row_h * i as i32;
             let value_color = if light && row.color == TEXT_MAIN {
@@ -1575,7 +1931,9 @@ unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, light: bo
                 bold: true,
                 color: value_color,
             };
-            draw_text(&mut canvas, &row.label, x, y, Align::Left, &label);
+            if labels {
+                draw_text(&mut canvas, &row.label, x, y, Align::Left, &label);
+            }
             draw_text(&mut canvas, &row.value, right, y, Align::Right, &value);
         }
         x = right + px(TASKBAR_COLUMN_GAP);
@@ -1692,6 +2050,10 @@ unsafe extern "system" fn widget_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             let _ = GetWindowRect(hwnd, &mut after);
             if (before.left, before.top) != (after.left, after.top) {
                 UI.with(|ui| ui.floating_position.set(Some((after.left, after.top))));
+                let monitor = monitor_entry(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
+                if let Some(monitor) = monitor {
+                    *WANTED_MONITOR.lock().unwrap() = Some(monitor.name);
+                }
                 save_settings();
             } else {
                 widget_clicked();
@@ -1703,6 +2065,10 @@ unsafe extern "system" fn widget_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_DISPLAYCHANGE if UI.with(|ui| ui.widget_mode.get()) == WidgetMode::Floating => {
+            keep_on_screen(hwnd);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             log::info!("widget window destroyed");
             LRESULT(0)
@@ -1735,13 +2101,14 @@ struct Settings {
     visible: bool,
     items: Vec<WidgetItem>,
     mode: WidgetMode,
+    monitor: Option<String>,
 }
 
 fn settings_path() -> Option<PathBuf> {
     Some(logging::app_data_dir()?.join("widget.txt"))
 }
 
-/// Parses "x y visible item,item,... mode"; anything unreadable falls back to the
+/// Parses "x y visible item,item,... mode monitor"; anything unreadable falls back to the
 /// defaults. x and y are the floating position, kept while the widget is on the taskbar.
 fn parse_settings(text: &str) -> Settings {
     let mut parts = text.split_whitespace();
@@ -1763,11 +2130,13 @@ fn parse_settings(text: &str) -> Settings {
         .next()
         .and_then(WidgetMode::from_token)
         .unwrap_or(DEFAULT_WIDGET_MODE);
+    let monitor = parts.next().filter(|&m| m != "-").map(str::to_string);
     Settings {
         position: x.zip(y),
         visible,
         items,
         mode,
+        monitor,
     }
 }
 
@@ -1796,9 +2165,10 @@ unsafe fn save_settings() {
     let (x, y) = position.map_or(("-".to_string(), "-".to_string()), |(x, y)| {
         (x.to_string(), y.to_string())
     });
+    let monitor = WANTED_MONITOR.lock().unwrap().clone().unwrap_or("-".to_string());
     let _ = std::fs::write(
         path,
-        format!("{x} {y} {visible} {items} {}", mode.token()),
+        format!("{x} {y} {visible} {items} {} {monitor}", mode.token()),
     );
 }
 
@@ -1838,6 +2208,7 @@ mod tests {
                 visible: false,
                 items: default_items(),
                 mode: DEFAULT_WIDGET_MODE,
+                monitor: None,
             }
         );
         let defaults = Settings {
@@ -1845,6 +2216,7 @@ mod tests {
             visible: true,
             items: default_items(),
             mode: DEFAULT_WIDGET_MODE,
+            monitor: None,
         };
         assert_eq!(parse_settings(""), defaults);
         assert_eq!(parse_settings("not numbers"), defaults);
@@ -1901,9 +2273,151 @@ mod tests {
     }
 
     #[test]
+    fn labels_go_first_then_columns_from_the_end_then_the_widget() {
+        let widths = [(50, 30), (40, 20), (40, 20)];
+        let gaps = (6, 14, 6);
+        let fit = |room| taskbar_level(&widths, gaps, room, 0, 0);
+        let parts = |room| taskbar_level_parts(fit(room), widths.len());
+        assert_eq!(parts(1000), (true, 3));
+        assert_eq!(parts(258), (true, 3), "exactly fits with labels");
+        assert_eq!(parts(257), (false, 3));
+        assert_eq!(parts(110), (false, 3));
+        assert_eq!(parts(109), (false, 2));
+        assert_eq!(parts(76), (false, 2));
+        assert_eq!(parts(75), (false, 1));
+        assert_eq!(parts(42), (false, 1));
+        assert_eq!(parts(41), (false, 0), "nothing fits, and it must not cover the icons");
+        assert_eq!(parts(0), (false, 0));
+    }
+
+    #[test]
+    fn a_fuller_layout_returns_only_with_room_to_spare() {
+        let widths = [(50, 30), (40, 20)]; // 178 with labels, 76 without
+        let gaps = (6, 14, 6);
+        let fit = |room, shown| taskbar_level(&widths, gaps, room, 16, shown);
+        assert_eq!(fit(178, 1), 1, "barely fits, so labels stay off");
+        assert_eq!(fit(194, 1), 0);
+        assert_eq!(fit(178, 0), 0, "already showing, so stays while it fits");
+        assert_eq!(fit(177, 0), 1);
+    }
+
+    /// What the default readings do on a laptop, using real text measurements and the
+    /// taskbar sizes measured on Windows 11 at 100%: 45 px for Start, 44 for Task View
+    /// and each app, 220 or 44 for search, 251 for the tray. Returns the free space,
+    /// whether labels show, and how many of the 2 columns show.
+    fn laptop_layout(screen_w: i32, scale: f32, search_w: f32, apps: u32) -> (i32, bool, usize) {
+        let px = |v: f32| (v * scale).round() as i32;
+        let bar = rect(0, 0, screen_w, px(48.0));
+        let tray_left = screen_w - px(251.0);
+        let icons = px(45.0 + search_w + 44.0 + 44.0 * apps as f32);
+        let room = taskbar_room(&bar, tray_left, screen_w / 2 + icons / 2);
+        let mut readings = sample_readings(TempState::Live(48));
+        readings.cpu_power = Some(15.0);
+        let rows = widget_rows(&default_items(), &readings);
+        let columns: Vec<&[Row]> = rows.chunks(TASKBAR_ROWS_PER_COLUMN).collect();
+        let widths = unsafe { taskbar_column_widths(&columns, px(TASKBAR_TEXT_PX)) };
+        let gaps = (px(TASKBAR_LABEL_GAP), px(TASKBAR_COLUMN_GAP), px(TASKBAR_PAD_X));
+        let level = taskbar_level(&widths, gaps, room, 0, 0);
+        let (labels, count) = taskbar_level_parts(level, columns.len());
+        (room, labels, count)
+    }
+
+    #[test]
+    fn fourteen_inch_laptop_with_eight_apps() {
+        let at = |w, scale, search| laptop_layout(w, scale, search, 8);
+        let (box_w, icon_w) = (220.0, 44.0);
+        assert_eq!(at(1920, 1.5, box_w), (83, false, 1), "1080p at 150%, search box");
+        assert_eq!(at(1920, 1.5, icon_w), (215, false, 2), "1080p at 150%, search icon");
+        assert_eq!(at(1920, 1.25, box_w), (229, false, 2), "1080p at 125%, search box");
+        assert_eq!(at(1920, 1.25, icon_w), (339, true, 2), "1080p at 125%, search icon");
+        assert_eq!(at(1366, 1.0, box_w), (98, false, 1), "1366x768, search box");
+        assert_eq!(at(1366, 1.0, icon_w), (186, false, 2), "1366x768, search icon");
+    }
+
+    fn monitor(name: &str, left: i32, primary: bool) -> MonitorEntry {
+        MonitorEntry {
+            name: name.to_string(),
+            rect: rect(left, 0, left + 1920, 1080),
+            work: rect(left, 0, left + 1920, 1032),
+            primary,
+        }
+    }
+
+    #[test]
+    fn the_chosen_monitor_wins_and_an_unplugged_one_falls_back_to_primary() {
+        let monitors = [monitor("A", 0, true), monitor("B", 1920, false)];
+        let name = |wanted| choose_monitor(&monitors, wanted).map(|m| m.name.as_str());
+        assert_eq!(name(Some("B")), Some("B"));
+        assert_eq!(name(None), Some("A"));
+        assert_eq!(name(Some("unplugged")), Some("A"));
+        assert_eq!(choose_monitor(&[], Some("B")), None);
+    }
+
+    #[test]
+    fn monitors_list_primary_first_then_left_to_right() {
+        let sorted = sorted_monitors(vec![
+            monitor("right", 1920, false),
+            monitor("left", -1920, false),
+            monitor("primary", 0, true),
+        ]);
+        let names: Vec<&str> = sorted.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["primary", "left", "right"]);
+    }
+
+    #[test]
+    fn monitor_labels_say_what_matters() {
+        assert_eq!(monitor_label(0, &monitor("A", 0, true), true), "Monitor 1 (primary): 1920 x 1080");
+        assert_eq!(monitor_label(1, &monitor("B", 1920, false), true), "Monitor 2: 1920 x 1080");
+        assert_eq!(
+            monitor_label(1, &monitor("B", 1920, false), false),
+            "Monitor 2 (no taskbar): 1920 x 1080"
+        );
+    }
+
+    #[test]
+    fn the_chosen_monitor_is_saved_and_older_settings_still_load() {
+        let s = parse_settings(r"1 2 true cpu_temp overlay \\.\DISPLAY2");
+        assert_eq!(s.monitor.as_deref(), Some(r"\\.\DISPLAY2"));
+        assert_eq!(parse_settings("1 2 true cpu_temp overlay -").monitor, None);
+        assert_eq!(parse_settings("1 2 true cpu_temp overlay").monitor, None);
+    }
+
+    #[test]
+    fn a_short_taskbar_gets_one_row_per_column() {
+        assert_eq!(taskbar_rows_per_column(48, 17), 2);
+        assert_eq!(taskbar_rows_per_column(34, 17), 2);
+        assert_eq!(taskbar_rows_per_column(30, 17), 1);
+        assert_eq!(taskbar_rows_per_column(0, 17), 1);
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    #[test]
+    fn room_runs_from_the_icons_to_the_tray() {
+        let bar = rect(0, 1392, 2560, 1440);
+        assert_eq!(taskbar_room(&bar, 2309, 1569), 2309 - TASKBAR_TRAY_GAP - 1569);
+        assert_eq!(taskbar_room(&bar, 2309, ICONS_UNKNOWN), 2309 - TASKBAR_TRAY_GAP - 1280);
+        assert_eq!(taskbar_room(&bar, 1000, 999), 0, "never negative");
+    }
+
+    #[test]
+    fn a_floating_widget_is_pulled_back_inside_the_work_area() {
+        let work = rect(0, 0, 1366, 720);
+        let at = |x, y| rect(x, y, x + 192, y + 200);
+        assert_eq!(clamped_position(&at(100, 100), &work), (100, 100));
+        assert_eq!(clamped_position(&at(2000, 1200), &work), (1366 - 192, 720 - 200));
+        assert_eq!(clamped_position(&at(-50, -50), &work), (0, 0));
+        let too_tall = rect(100, 100, 292, 900);
+        assert_eq!(clamped_position(&too_tall, &work), (100, 0), "keeps the top in view");
+    }
+
+    #[test]
     fn overlay_only_shows_while_the_taskbar_is_on_screen() {
         assert!(taskbar_on_screen(1392, 1440));
         assert!(!taskbar_on_screen(1438, 1440), "auto-hidden taskbar");
+        assert!(taskbar_on_screen(2472, 2520), "a monitor placed below the primary one");
     }
 
     #[test]

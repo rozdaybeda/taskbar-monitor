@@ -22,7 +22,7 @@ Releases aren't code-signed yet, so Windows may warn that the publisher is unkno
 - **CPU:** temperature, frequency, power and load, including per-core load and clocks
 - **GPU:** temperature, clock, load, power and video memory, for every NVIDIA and AMD GPU
 - **Memory:** usage and history
-- **Taskbar widget:** choose what it shows, and whether it sits on the taskbar or floats
+- **Taskbar widget:** choose what it shows, whether it sits on the taskbar or floats, and on which monitor
 - **Tray icon:** runs quietly in the background
 - **Device info:** specs for your CPU and GPUs
 - **Benchmarks:** bandwidth, latency and throughput for CPU, memory and GPU
