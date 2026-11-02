@@ -1897,6 +1897,9 @@ struct TaskbarLayout {
     rows: usize,
     /// How many readings to keep on the first row, once it's the only one.
     first_row_values: usize,
+    /// Whether those readings stack instead of sitting side by side, taking the width of
+    /// just the widest one.
+    stacked: bool,
 }
 
 impl TaskbarLayout {
@@ -1913,19 +1916,25 @@ impl TaskbarLayout {
 }
 
 /// The layouts to try, fullest first. Labels go first, since the units mostly say what's
-/// what. Then rows from the end, then readings from the end of the one row left.
+/// what. Then rows from the end, then readings from the end of the one row left, with the
+/// first two stacked before giving up the second of them.
 fn taskbar_layouts(rows: usize, first_row_values: usize) -> Vec<TaskbarLayout> {
-    let with = |labels, rows, first_row_values| TaskbarLayout {
+    let with = |labels, rows, first_row_values, stacked| TaskbarLayout {
         labels,
         rows,
         first_row_values,
+        stacked,
     };
     let mut layouts = vec![
-        with(true, rows, first_row_values),
-        with(false, rows, first_row_values),
+        with(true, rows, first_row_values, false),
+        with(false, rows, first_row_values, false),
     ];
-    layouts.extend((1..rows).rev().map(|r| with(false, r, first_row_values)));
-    layouts.extend((1..first_row_values).rev().map(|v| with(false, 1, v)));
+    layouts.extend((1..rows).rev().map(|r| with(false, r, first_row_values, false)));
+    layouts.extend((2..first_row_values).rev().map(|v| with(false, 1, v, false)));
+    if first_row_values >= 2 {
+        layouts.push(with(false, 1, 2, true));
+        layouts.push(with(false, 1, 1, false));
+    }
     layouts
 }
 
@@ -2005,7 +2014,7 @@ fn taskbar_columns(
     per_column: usize,
     gaps: TaskbarGaps,
 ) -> Vec<(i32, ValueGrid)> {
-    let kept: Vec<(i32, &[i32])> = widths
+    let mut kept: Vec<(i32, &[i32])> = widths
         .iter()
         .enumerate()
         .filter_map(|(i, row)| {
@@ -2013,6 +2022,12 @@ fn taskbar_columns(
             Some((row.label, &row.values[..count]))
         })
         .collect();
+    if layout.stacked {
+        kept = kept
+            .iter()
+            .flat_map(|&(label, values)| values.chunks(1).map(move |value| (label, value)))
+            .collect();
+    }
     kept.chunks(per_column.max(1))
         .map(|column| {
             let label = column.iter().map(|c| c.0).max().unwrap_or(0);
@@ -2097,6 +2112,7 @@ unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, room: i32
         labels: false,
         rows: 0,
         first_row_values: 0,
+        stacked: false,
     };
     let layout = layouts.get(level).copied().unwrap_or(hide_all);
     let shown: Vec<Row> = rows
@@ -2111,6 +2127,19 @@ unsafe fn render_taskbar_widget(rows: &[Row], scale: f32, height: i32, room: i32
         .collect();
     let total = |rows: &[Row]| rows.iter().map(|row| row.values.len()).sum::<usize>();
     let hidden = total(rows) - total(&shown);
+    let shown: Vec<Row> = if layout.stacked {
+        shown
+            .iter()
+            .flat_map(|row| {
+                row.values.iter().map(|value| Row {
+                    label: row.label.clone(),
+                    values: vec![value.clone()],
+                })
+            })
+            .collect()
+    } else {
+        shown
+    };
     if level != before {
         log::info!("taskbar widget in {room} px: {layout:?}, {hidden} readings hidden");
     }
@@ -2497,17 +2526,45 @@ mod tests {
         let layouts = taskbar_layouts(2, 3);
         let fit = |room| {
             let level = taskbar_level(&layouts, &widths, 2, gaps(), room, 0, 0);
-            layouts.get(level).map(|l| (l.labels, l.rows, l.first_row_values))
+            layouts.get(level).map(|l| (l.labels, l.rows, l.first_row_values, l.stacked))
         };
-        assert_eq!(fit(1000), Some((true, 2, 3)));
-        assert_eq!(fit(144), Some((true, 2, 3)), "exactly fits: 40 + 6 + 86 + 12");
-        assert_eq!(fit(143), Some((false, 2, 3)));
-        assert_eq!(fit(98), Some((false, 2, 3)));
-        assert_eq!(fit(97), Some((false, 1, 2)), "dropping Memory alone doesn't narrow it");
-        assert_eq!(fit(70), Some((false, 1, 2)));
-        assert_eq!(fit(69), Some((false, 1, 1)));
-        assert_eq!(fit(42), Some((false, 1, 1)));
+        assert_eq!(fit(1000), Some((true, 2, 3, false)));
+        assert_eq!(fit(144), Some((true, 2, 3, false)), "exactly fits: 40 + 6 + 86 + 12");
+        assert_eq!(fit(143), Some((false, 2, 3, false)));
+        assert_eq!(fit(98), Some((false, 2, 3, false)));
+        assert_eq!(fit(97), Some((false, 1, 2, false)), "dropping Memory alone doesn't narrow it");
+        assert_eq!(fit(70), Some((false, 1, 2, false)));
+        assert_eq!(fit(69), Some((false, 1, 2, true)), "stacks rather than lose the second");
+        assert_eq!(fit(42), Some((false, 1, 2, true)));
         assert_eq!(fit(41), None, "nothing fits, and it must not cover the icons");
+    }
+
+    #[test]
+    fn the_second_reading_goes_only_when_stacking_is_too_wide() {
+        // The second reading is the wider one, so stacking needs 60 + 12 and alone needs 30 + 12.
+        let widths = [row_widths(30, &[30, 60])];
+        let layouts = taskbar_layouts(1, 2);
+        let fit = |room| {
+            let level = taskbar_level(&layouts, &widths, 2, gaps(), room, 0, 0);
+            layouts.get(level).map(|l| (l.first_row_values, l.stacked))
+        };
+        assert_eq!(fit(72), Some((2, true)));
+        assert_eq!(fit(71), Some((1, false)));
+        assert_eq!(fit(42), Some((1, false)));
+        assert_eq!(fit(41), None);
+    }
+
+    #[test]
+    fn stacked_readings_each_take_a_line_of_one_column() {
+        let widths = [row_widths(30, &[40, 25, 20])];
+        let stacked = taskbar_layouts(1, 3).into_iter().find(|l| l.stacked).unwrap();
+        assert_eq!(stacked.first_row_values, 2);
+        let columns = taskbar_columns(stacked, &widths, 2, gaps());
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].1.width, 40);
+        // A taskbar too short to stack gets two columns, which is no narrower, so this
+        // layout then never wins over the single reading.
+        assert_eq!(taskbar_columns(stacked, &widths, 1, gaps()).len(), 2);
     }
 
     #[test]
@@ -2561,8 +2618,9 @@ mod tests {
     /// What the default readings do on a laptop, using real text measurements and the
     /// taskbar sizes measured on Windows 11 at 100%: 45 px for Start, 44 for Task View
     /// and each app, 220 or 44 for search, 251 for the tray. Returns the free space, whether
-    /// labels show, how many rows show, and how many readings the first row keeps.
-    fn laptop_layout(screen_w: i32, scale: f32, search_w: f32, apps: u32) -> (i32, bool, usize, usize) {
+    /// labels show, how many rows show, how many readings the first row keeps, and whether
+    /// they're stacked.
+    fn laptop_layout(screen_w: i32, scale: f32, search_w: f32, apps: u32) -> (i32, bool, usize, usize, bool) {
         let px = |v: f32| (v * scale).round() as i32;
         let bar = rect(0, 0, screen_w, px(48.0));
         let tray_left = screen_w - px(251.0);
@@ -2581,19 +2639,19 @@ mod tests {
         let layouts = taskbar_layouts(rows.len(), rows[0].values.len());
         let level = taskbar_level(&layouts, &widths, TASKBAR_ROWS_PER_COLUMN, gaps, room, 0, 0);
         let layout = layouts[level];
-        (room, layout.labels, layout.rows, layout.first_row_values)
+        (room, layout.labels, layout.rows, layout.first_row_values, layout.stacked)
     }
 
     #[test]
     fn fourteen_inch_laptop_with_eight_apps() {
         let at = |w, scale, search| laptop_layout(w, scale, search, 8);
         let (box_w, icon_w) = (220.0, 44.0);
-        assert_eq!(at(1920, 1.5, box_w), (83, false, 1, 1), "1080p at 150%, search box");
-        assert_eq!(at(1920, 1.5, icon_w), (215, false, 1, 2), "1080p at 150%, search icon");
-        assert_eq!(at(1920, 1.25, box_w), (229, false, 2, 3), "1080p at 125%, search box");
-        assert_eq!(at(1920, 1.25, icon_w), (339, true, 2, 3), "1080p at 125%, search icon");
-        assert_eq!(at(1366, 1.0, box_w), (98, false, 1, 2), "1366x768, search box");
-        assert_eq!(at(1366, 1.0, icon_w), (186, false, 2, 3), "1366x768, search icon");
+        assert_eq!(at(1920, 1.5, box_w), (83, false, 1, 2, true), "1080p at 150%, search box");
+        assert_eq!(at(1920, 1.5, icon_w), (215, false, 1, 2, false), "1080p at 150%, search icon");
+        assert_eq!(at(1920, 1.25, box_w), (229, false, 2, 3, false), "1080p at 125%, search box");
+        assert_eq!(at(1920, 1.25, icon_w), (339, true, 2, 3, false), "1080p at 125%, search icon");
+        assert_eq!(at(1366, 1.0, box_w), (98, false, 1, 2, false), "1366x768, search box");
+        assert_eq!(at(1366, 1.0, icon_w), (186, false, 2, 3, false), "1366x768, search icon");
     }
 
     fn monitor(name: &str, left: i32, primary: bool) -> MonitorEntry {
