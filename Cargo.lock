@@ -1919,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "monitor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "embed-manifest",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-setup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "embed-manifest",
  "log",
